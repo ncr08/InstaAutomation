@@ -41,6 +41,29 @@ class SummaryRequest:
     on_screen_text: str
     creator: str
     index: str
+    topics: dict[str, str]
+    """Current guidance body of every topic, by slug, so an existing topic can be merged into."""
+
+
+@dataclass(frozen=True)
+class ExistingTopic:
+    slug: str
+
+
+@dataclass(frozen=True)
+class NewTopic:
+    slug: str
+    title: str
+    problem: str
+
+
+@dataclass(frozen=True)
+class TopicDecision:
+    """Where a reel belongs, plus the topic's guidance rewritten to include it."""
+
+    target: ExistingTopic | NewTopic
+    approach: str
+    body: str
 
 
 @dataclass(frozen=True)
@@ -53,7 +76,7 @@ class EntryDraft:
     caveats: list[str]
     tools: list[str]
     tags: list[str]
-    topic: str
+    topic: TopicDecision
 
 
 class Inbox(Protocol):

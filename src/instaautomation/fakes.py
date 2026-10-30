@@ -77,8 +77,10 @@ class FakeSummarizer(_Failable):
     def __init__(self, draft: EntryDraft) -> None:
         super().__init__()
         self.draft = draft
+        self.requests: list[SummaryRequest] = []
 
     def summarize(self, request: SummaryRequest) -> EntryDraft:
+        self.requests.append(request)
         self._maybe_fail()
         return self.draft
 

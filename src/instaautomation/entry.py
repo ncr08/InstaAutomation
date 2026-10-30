@@ -14,7 +14,7 @@ def render_entry(reel: Reel, draft: EntryDraft, date_added: str, transcript: str
             "shortcode": reel.shortcode,
             "creator": reel.creator,
             "date_added": date_added,
-            "topic": draft.topic,
+            "topic": draft.topic.target.slug,
             "tools": draft.tools,
             "tags": draft.tags,
         },

@@ -5,8 +5,10 @@ import re
 from pathlib import Path
 
 from instaautomation.entry import render_entry
-from instaautomation.ports import EntryDraft, Inbox, MessageRef, Ports, SummaryRequest
+from instaautomation.navigation import render_claude_block, render_index
+from instaautomation.ports import EntryDraft, ExistingTopic, Inbox, MessageRef, NewTopic, Ports, SummaryRequest, TopicDecision
 from instaautomation.state import QueueItem, State, load_state, save_state
+from instaautomation.topics import Topic, load_topics, write_topic
 
 REEL_LINK = re.compile(r"https?://(?:www\.)?instagram\.com/(reels?|p)/([A-Za-z0-9_-]+)")
 ADDED = "✅"
@@ -42,6 +44,21 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
             state.processed.add(item.shortcode)
             save_state(kb_dir, state)
             _react(ports.inbox, item.ref, ADDED)
+    _regenerate_navigation(kb_dir)
+
+
+def _regenerate_navigation(kb_dir: Path) -> None:
+    """Rebuilt from the topic files every cycle, so hand edits such as pinning show up without a new reel."""
+    topics = load_topics(kb_dir).values()
+    if not topics:
+        return
+    _write_if_changed(kb_dir / "index.md", render_index(topics))
+    _write_if_changed(kb_dir / "claude-block.md", render_claude_block(topics))
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    if not path.exists() or path.read_text() != text:
+        path.write_text(text)
 
 
 def _enqueue(inbox: Inbox, state: State, owner_id: int) -> list[MessageRef]:
@@ -79,6 +96,8 @@ def _react(inbox: Inbox, ref: MessageRef, emoji: str, reason: str | None = None)
 
 
 def _process(ports: Ports, kb_dir: Path, item: QueueItem) -> None:
+    # Read before any paid call, so an unreadable topic file costs nothing.
+    topics = load_topics(kb_dir)
     reel = ports.reel_source.fetch(item.url)
     transcript = ports.transcriber.transcribe(reel.video_path)
     on_screen_text = ports.screen_reader.read(reel.video_path)
@@ -88,24 +107,51 @@ def _process(ports: Ports, kb_dir: Path, item: QueueItem) -> None:
             caption=reel.caption,
             on_screen_text=on_screen_text,
             creator=reel.creator,
-            index="",
+            index=render_index(topics.values()),
+            topics={slug: topic.body for slug, topic in topics.items()},
         )
     )
-    _check_draft(draft)
+    _check_draft(draft, topics, reel.shortcode)
     date_added = ports.clock.now().date().isoformat()
     entry_path = kb_dir / "entries" / f"{reel.shortcode}.md"
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_text(render_entry(reel, draft, date_added, transcript, on_screen_text))
+    write_topic(kb_dir, _routed_topic(draft.topic, topics, reel.shortcode, date_added))
+
+
+def _routed_topic(decision: TopicDecision, topics: dict[str, Topic], shortcode: str, date: str) -> Topic:
+    target = decision.target
+    if isinstance(target, NewTopic):
+        # Only already on disk when retrying after a crash that followed this reel's own topic write.
+        previous = topics.get(target.slug)
+        topic = Topic(
+            slug=target.slug,
+            title=target.title,
+            problem=target.problem,
+            approach=decision.approach,
+            pinned=previous.pinned if previous else False,
+            entries=previous.entries if previous else [],
+            updated=date,
+            body=decision.body,
+        )
+    else:
+        # Title, problem and the user's pinned flag stay as they are on disk.
+        topic = topics[target.slug]
+        topic.approach = decision.approach
+        topic.body = decision.body
+        topic.updated = date
+    if shortcode not in topic.entries:
+        topic.entries.append(shortcode)
+    return topic
 
 
 class MalformedSummary(ValueError):
     """The summarizer returned something that can't safely become a knowledge-base entry."""
 
 
-def _check_draft(draft: EntryDraft) -> None:
-    for name in ("summary", "technique", "when_useful", "topic"):
-        value = getattr(draft, name)
-        if not isinstance(value, str) or not value.strip():
+def _check_draft(draft: EntryDraft, topics: dict[str, Topic], shortcode: str) -> None:
+    for name in ("summary", "technique", "when_useful"):
+        if not _is_text(getattr(draft, name)):
             raise MalformedSummary(f"{name} must be non-empty text")
     for name in ("steps", "prerequisites", "caveats", "tools", "tags"):
         value = getattr(draft, name)
@@ -113,8 +159,30 @@ def _check_draft(draft: EntryDraft) -> None:
             raise MalformedSummary(f"{name} must be a list of text")
     if not draft.steps:
         raise MalformedSummary("steps must not be empty")
-    if not TOPIC_SLUG.fullmatch(draft.topic):
-        raise MalformedSummary(f"topic is not a slug: {draft.topic!r}")
+    _check_decision(draft.topic, topics, shortcode)
+
+
+def _check_decision(decision: TopicDecision, topics: dict[str, Topic], shortcode: str) -> None:
+    target = decision.target
+    if not TOPIC_SLUG.fullmatch(target.slug):
+        raise MalformedSummary(f"topic is not a slug: {target.slug!r}")
+    # The index and Claude block show these one line per topic.
+    one_liners = {"approach": decision.approach}
+    if isinstance(target, NewTopic):
+        one_liners |= {"title": target.title, "problem": target.problem}
+    for name, value in one_liners.items():
+        if not _is_text(value) or "\n" in value.strip():
+            raise MalformedSummary(f"topic {name} must be a single line of text")
+    if not _is_text(decision.body):
+        raise MalformedSummary("topic body must be non-empty text")
+    if isinstance(target, ExistingTopic) and target.slug not in topics:
+        raise MalformedSummary(f"existing topic does not exist: {target.slug}")
+    if isinstance(target, NewTopic) and target.slug in topics and shortcode not in topics[target.slug].entries:
+        raise MalformedSummary(f"new topic already exists: {target.slug}")
+
+
+def _is_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _one_line(error: Exception) -> str:
