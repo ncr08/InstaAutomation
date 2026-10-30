@@ -24,6 +24,34 @@ class EntryListing:
     date_added: str
 
 
+@dataclass(frozen=True)
+class Entry:
+    """An entry file in full, as the frontend and the cover backfill read it."""
+
+    listing: EntryListing
+    source_url: str
+    creator: str
+    tools: list[str]
+    tags: list[str]
+    body: str
+    """The Markdown after the frontmatter."""
+
+    @property
+    def shortcode(self) -> str:
+        return self.listing.shortcode
+
+    def sections(self) -> dict[str, str]:
+        """Each `## ` section's Markdown by heading, in file order, without the raw transcript block."""
+        written = self.body.split("\n<details>", 1)[0]
+        parts = re.split(r"^## (.+)\n", written, flags=re.MULTILINE)
+        return {heading.strip(): text.strip() for heading, text in zip(parts[1::2], parts[2::2])}
+
+    def raw_text(self, heading: str) -> str:
+        """The fenced text under a `### ` heading of the raw block, such as Transcript or On-screen text."""
+        match = re.search(rf"^### {re.escape(heading)}\n\n(`{{3,}})text\n(.*?)\n\1$", self.body, re.DOTALL | re.MULTILINE)
+        return match.group(2) if match else ""
+
+
 def render_entry(reel: Reel, draft: EntryDraft, date_added: str, transcript: str, on_screen_text: str) -> str:
     frontmatter = yaml.safe_dump(
         {
@@ -60,24 +88,37 @@ def render_entry(reel: Reel, draft: EntryDraft, date_added: str, transcript: str
     return f"---\n{frontmatter}---\n\n{body}\n\n{raw}"
 
 
+def entry_path(kb_dir: Path, shortcode: str) -> Path:
+    return kb_dir / "entries" / f"{shortcode}.md"
+
+
+def cover_path(kb_dir: Path, shortcode: str) -> Path:
+    """The cover sits next to its entry; whether an entry has one is whether this file exists."""
+    return kb_dir / "entries" / f"{shortcode}.jpg"
+
+
 def load_entries(kb_dir: Path) -> list[EntryListing]:
+    return [entry.listing for entry in read_entries(kb_dir)]
+
+
+def read_entries(kb_dir: Path) -> list[Entry]:
     entries = []
     for path in sorted((kb_dir / "entries").glob("*.md")):
         try:
-            entries.append(_listing(path))
+            entries.append(_read(path))
         except (ValueError, KeyError, TypeError, yaml.YAMLError):
             # Entries are hand-editable (e.g. to pin); one broken file must not hide the rest.
             log.warning("skipping unreadable entry %s", path.name, exc_info=True)
     return entries
 
 
-def _listing(path: Path) -> EntryListing:
+def _read(path: Path) -> Entry:
     text = path.read_text().replace("\r\n", "\n")
     match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     if not match:
         raise ValueError(f"{path} has no frontmatter")
     meta = yaml.safe_load(match.group(1))
-    return EntryListing(
+    listing = EntryListing(
         shortcode=path.stem,
         category=str(meta["category"]),
         problem=_one_line(meta, "problem"),
@@ -85,6 +126,21 @@ def _listing(path: Path) -> EntryListing:
         pinned=meta.get("pinned") is True,
         date_added=str(meta["date_added"]),
     )
+    return Entry(
+        listing=listing,
+        source_url=str(meta.get("source_url") or ""),
+        creator=str(meta.get("creator") or ""),
+        tools=_texts(meta.get("tools")),
+        tags=_texts(meta.get("tags")),
+        body=text[match.end() :],
+    )
+
+
+def _texts(value: object) -> list[str]:
+    """A hand-edited list may have gone missing or become a single word."""
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)] if value else []
 
 
 def _one_line(meta: dict[str, object], key: str) -> str:

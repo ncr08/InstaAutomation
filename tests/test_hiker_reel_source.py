@@ -10,6 +10,7 @@ from instaautomation.ports import Reel
 URL = "https://www.instagram.com/reel/DAbc123XyZ/"
 VIDEO_URL = "https://scontent.cdninstagram.com/v/DAbc123XyZ.mp4"
 VIDEO_BYTES = b"\x00\x00\x00\x18ftypmp42"
+THUMBNAIL_URL = "https://scontent.cdninstagram.com/v/DAbc123XyZ.jpg"
 MEDIA = {
     "pk": "1",
     "id": "1_2",
@@ -18,6 +19,7 @@ MEDIA = {
     "user": {"pk": "2", "username": "aitipsdaily"},
     "caption_text": "Stop clicking approve #claudecode",
     "video_url": VIDEO_URL,
+    "thumbnail_url": THUMBNAIL_URL,
 }
 
 
@@ -66,8 +68,29 @@ def test_reel_url_becomes_a_downloaded_video_with_caption_creator_and_shortcode(
         creator="aitipsdaily",
         caption="Stop clicking approve #claudecode",
         video_path=tmp_path / "DAbc123XyZ.mp4",
+        cover_url=THUMBNAIL_URL,
     )
     assert reel.video_path.read_bytes() == VIDEO_BYTES
+
+
+def test_a_carousel_without_its_own_cover_takes_its_first_resources_cover(tmp_path: Path) -> None:
+    carousel = {
+        **MEDIA,
+        "media_type": 8,
+        "video_url": None,
+        "thumbnail_url": None,
+        "resources": [{"media_type": 2, "video_url": VIDEO_URL, "thumbnail_url": THUMBNAIL_URL}],
+    }
+
+    reel = source_for(FakeHiker(carousel), tmp_path).fetch(URL)
+
+    assert reel.cover_url == THUMBNAIL_URL
+
+
+def test_a_reel_without_any_cover_has_none(tmp_path: Path) -> None:
+    reel = source_for(FakeHiker({**MEDIA, "thumbnail_url": None}), tmp_path).fetch(URL)
+
+    assert reel.cover_url is None
 
 
 def test_asks_hikerapi_media_by_url_with_the_access_key_header(tmp_path: Path) -> None:

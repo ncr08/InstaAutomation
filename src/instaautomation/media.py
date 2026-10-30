@@ -66,3 +66,19 @@ def ocr(image: Path) -> str:
         if float(columns[10]) >= MIN_WORD_CONFIDENCE:
             lines.setdefault((columns[2], columns[3], columns[4]), []).append(columns[11])
     return "\n".join(" ".join(words) for words in lines.values())
+
+
+def extract_frame(video_path: Path, out: Path, at_seconds: float) -> None:
+    """One full-colour frame at `at_seconds`, or the first frame of a video shorter than that."""
+    for seek in (["-ss", str(at_seconds)], []):
+        # Seeking past the end exits cleanly with no frame written, hence the retry from the start.
+        run_tool(["ffmpeg", "-nostdin", "-v", "error", "-y", *seek, "-i", str(video_path), "-frames:v", "1", "-update", "1", str(out)])
+        if out.exists() and out.stat().st_size:
+            return
+    raise ToolError(f"ffmpeg found no frame in {video_path.name}")
+
+
+def to_jpeg(image: Path, out: Path, width: int) -> None:
+    """The image as a JPEG at most `width` pixels wide, keeping its aspect ratio."""
+    scale = f"scale='min({width},iw)':-2"
+    run_tool(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(image), "-vf", scale, "-q:v", "4", "-frames:v", "1", "-update", "1", str(out)])

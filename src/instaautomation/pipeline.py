@@ -2,12 +2,13 @@
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from instaautomation.categories import load_categories
-from instaautomation.entry import load_entries, render_entry
+from instaautomation.entry import cover_path, entry_path, load_entries, read_entries, render_entry
 from instaautomation.navigation import render_claude_block, render_index
-from instaautomation.ports import EntryDraft, Inbox, MessageRef, Ports, SummaryRequest
+from instaautomation.ports import CoverMaker, EntryDraft, Inbox, MessageRef, Ports, Reel, ReelSource, SummaryRequest
 from instaautomation.state import QueueItem, State, load_state, save_state
 
 REEL_LINK = re.compile(r"https?://(?:www\.)?instagram\.com/(reels?|p)/([A-Za-z0-9_-]+)")
@@ -50,6 +51,30 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
             log.info("processed %s into %s", item.shortcode, category)
             _react(ports.inbox, item.ref, ADDED)
     _regenerate_navigation(kb_dir)
+
+
+@dataclass
+class CoverReport:
+    added: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    """Shortcode to a one-line reason."""
+
+
+def backfill_covers(reel_source: ReelSource, cover_maker: CoverMaker, kb_dir: Path) -> CoverReport:
+    """Gives every entry without a cover one, fetching its reel again. Never touches the queue or the inbox."""
+    report = CoverReport()
+    for entry in read_entries(kb_dir):
+        if cover_path(kb_dir, entry.shortcode).exists():
+            continue
+        try:
+            if not entry.source_url:
+                raise ValueError("entry has no source_url")
+            _save_cover(cover_maker, reel_source.fetch(entry.source_url), cover_path(kb_dir, entry.shortcode))
+        except Exception as error:
+            report.failed[entry.shortcode] = _one_line(error)
+        else:
+            report.added.append(entry.shortcode)
+    return report
 
 
 def _regenerate_navigation(kb_dir: Path) -> None:
@@ -120,10 +145,19 @@ def _process(ports: Ports, kb_dir: Path, item: QueueItem, categories: dict[str, 
     )
     _check_draft(draft, categories)
     date_added = ports.clock.now().date().isoformat()
-    entry_path = kb_dir / "entries" / f"{reel.shortcode}.md"
-    entry_path.parent.mkdir(parents=True, exist_ok=True)
-    entry_path.write_text(render_entry(reel, draft, date_added, transcript, on_screen_text))
+    path = entry_path(kb_dir, reel.shortcode)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_entry(reel, draft, date_added, transcript, on_screen_text))
+    try:
+        _save_cover(ports.cover_maker, reel, cover_path(kb_dir, reel.shortcode))
+    except Exception:
+        # Only a picture for the frontend: it must never cost the reel an attempt or its knowledge.
+        log.warning("could not save the cover of %s", reel.shortcode, exc_info=True)
     return draft.category
+
+
+def _save_cover(cover_maker: CoverMaker, reel: Reel, path: Path) -> None:
+    path.write_bytes(cover_maker.make(reel))
 
 
 class MalformedSummary(ValueError):

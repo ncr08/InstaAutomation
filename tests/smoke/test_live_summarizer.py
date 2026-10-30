@@ -13,7 +13,7 @@ import pytest
 
 from instaautomation.deepseek import DeepSeekSummarizer
 from instaautomation.entry import load_entries
-from instaautomation.fakes import FakeInbox, FakeReelSource, FakeScreenReader, FakeTranscriber, FixedClock
+from instaautomation.fakes import FakeCoverMaker, FakeInbox, FakeReelSource, FakeScreenReader, FakeTranscriber, FixedClock
 from instaautomation.pipeline import run_cycle
 from instaautomation.ports import Message, Ports, Reel
 
@@ -57,6 +57,7 @@ def test_deepseek_summarizes_real_text_into_entries_the_core_accepts(tmp_path: P
         transcriber=FakeTranscriber({videos[shortcode]: transcript for shortcode, transcript, _, _ in REELS}),
         screen_reader=FakeScreenReader({videos[shortcode]: text for shortcode, _, text, _ in REELS}),
         summarizer=DeepSeekSummarizer.from_env(),
+        cover_maker=FakeCoverMaker(),
         clock=FixedClock(datetime(2026, 10, 30, tzinfo=timezone.utc)),
     )
 

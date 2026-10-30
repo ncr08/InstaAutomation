@@ -32,6 +32,8 @@ class Reel:
     creator: str
     caption: str
     video_path: Path
+    cover_url: str | None = None
+    """The creator's own cover image, if the source offers one; such URLs expire."""
 
 
 @dataclass(frozen=True)
@@ -87,8 +89,34 @@ class Summarizer(Protocol):
     def summarize(self, request: SummaryRequest) -> EntryDraft: ...
 
 
+class CoverMaker(Protocol):
+    def make(self, reel: Reel) -> bytes:
+        """The reel's cover as a small JPEG."""
+        ...
+
+
 class Clock(Protocol):
     def now(self) -> datetime: ...
+
+
+class Updater(Protocol):
+    def update(self) -> str | None:
+        """Bring the knowledge base up to date without touching local changes; the reason it couldn't, or None."""
+        ...
+
+
+@dataclass(frozen=True)
+class CycleRun:
+    started_at: datetime
+    outcome: str
+    """success, failure, cancelled, or while it runs, in_progress or queued."""
+    url: str
+
+
+class CycleRuns(Protocol):
+    def latest(self) -> list[CycleRun] | None:
+        """The most recent scheduled cycles, newest first, or None if they can't be looked up."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -98,4 +126,5 @@ class Ports:
     transcriber: Transcriber
     screen_reader: ScreenReader
     summarizer: Summarizer
+    cover_maker: CoverMaker
     clock: Clock

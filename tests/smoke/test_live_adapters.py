@@ -10,7 +10,9 @@ from typing import NoReturn
 
 import httpx
 import pytest
+from PIL import Image
 
+from instaautomation.covers import FfmpegCoverMaker
 from instaautomation.hikerapi import HikerReelSource, yt_dlp_fetch
 from instaautomation.ports import MessageRef
 from instaautomation.telegram import TelegramInbox
@@ -47,6 +49,19 @@ def test_hikerapi_downloads_a_reel(tmp_path: Path) -> None:
     print(reel)
     assert reel.shortcode and reel.creator
     assert reel.video_path.stat().st_size > 10_000
+    assert reel.cover_url
+
+
+def test_the_cover_of_a_live_reel_is_a_small_jpeg(tmp_path: Path) -> None:
+    reel = HikerReelSource(api_key=os.environ["HIKERAPI_KEY"], download_dir=tmp_path).fetch(os.environ["SMOKE_REEL_URL"])
+
+    cover = FfmpegCoverMaker().make(reel)
+
+    (tmp_path / "cover.jpg").write_bytes(cover)
+    print(f"{len(cover) // 1000} KB, open {tmp_path / 'cover.jpg'} to look at it")
+    image = Image.open(tmp_path / "cover.jpg")
+    assert image.format == "JPEG" and image.width <= 480
+    assert len(cover) < 150_000
 
 
 def test_yt_dlp_fallback_downloads_a_reel(tmp_path: Path) -> None:
@@ -55,6 +70,7 @@ def test_yt_dlp_fallback_downloads_a_reel(tmp_path: Path) -> None:
 
     print(reel)
     assert reel.video_path.stat().st_size > 10_000
+    assert reel.cover_url
 
 
 def _no_fallback(url: str, download_dir: Path) -> NoReturn:

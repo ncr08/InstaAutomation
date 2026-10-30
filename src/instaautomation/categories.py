@@ -34,7 +34,13 @@ def load_categories(kb_dir: Path) -> dict[str, str]:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_CATEGORIES)
-    listed = yaml.safe_load(path.read_text()) or {}
+    return read_categories(kb_dir)
+
+
+def read_categories(kb_dir: Path) -> dict[str, str]:
+    """As load_categories, but never writes: a missing file means the defaults."""
+    path = kb_dir / CATEGORIES_FILE
+    listed = yaml.safe_load(path.read_text() if path.exists() else DEFAULT_CATEGORIES) or {}
     if not isinstance(listed, dict):
         raise ValueError(f"{path} must map each category slug to a description")
     categories = {}

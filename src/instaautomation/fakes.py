@@ -1,9 +1,9 @@
-"""In-memory fakes for every port, for driving run_cycle in tests."""
+"""In-memory fakes for every port, for driving run_cycle and the frontend in tests."""
 
 from datetime import datetime
 from pathlib import Path
 
-from instaautomation.ports import EntryDraft, Message, MessageRef, Reel, SummaryRequest
+from instaautomation.ports import CycleRun, EntryDraft, Message, MessageRef, Reel, SummaryRequest
 
 
 class _Failable:
@@ -88,9 +88,43 @@ class FakeSummarizer(_Failable):
         return self.draft
 
 
+class FakeCoverMaker(_Failable):
+    def __init__(self) -> None:
+        super().__init__()
+        self.made: list[str] = []
+
+    @staticmethod
+    def cover_for(shortcode: str) -> bytes:
+        return f"cover of {shortcode}".encode()
+
+    def make(self, reel: Reel) -> bytes:
+        self._maybe_fail()
+        self.made.append(reel.shortcode)
+        return self.cover_for(reel.shortcode)
+
+
 class FixedClock:
     def __init__(self, now: datetime) -> None:
         self._now = now
 
     def now(self) -> datetime:
         return self._now
+
+
+class FakeUpdater:
+    def __init__(self, failure: str | None = None) -> None:
+        self._failure = failure
+        self.calls = 0
+
+    def update(self) -> str | None:
+        self.calls += 1
+        return self._failure
+
+
+class FakeCycleRuns:
+    def __init__(self, runs: list[CycleRun] | None) -> None:
+        """None stands for gh being missing or logged out."""
+        self._runs = runs
+
+    def latest(self) -> list[CycleRun] | None:
+        return self._runs

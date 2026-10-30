@@ -9,6 +9,7 @@ import yaml
 
 from instaautomation.categories import CATEGORIES_FILE
 from instaautomation.fakes import (
+    FakeCoverMaker,
     FakeInbox,
     FakeReelSource,
     FakeScreenReader,
@@ -78,6 +79,7 @@ class World:
     transcriber: FakeTranscriber
     screen_reader: FakeScreenReader
     summarizer: FakeSummarizer
+    cover_maker: FakeCoverMaker
     next_update_id: int = 500
     now: datetime = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
 
@@ -89,6 +91,7 @@ class World:
                 transcriber=self.transcriber,
                 screen_reader=self.screen_reader,
                 summarizer=self.summarizer,
+                cover_maker=self.cover_maker,
                 clock=FixedClock(self.now),
             ),
             self.kb_dir,
@@ -146,6 +149,7 @@ def make_world(kb_dir: Path) -> World:
             {VIDEO: '"permissions": {"allow": ["Bash(git status)"]}', OTHER_VIDEO: ".claude/settings.json"}
         ),
         summarizer=FakeSummarizer(DRAFT),
+        cover_maker=FakeCoverMaker(),
     )
 
 
@@ -342,7 +346,7 @@ def test_sharing_a_reel_that_is_still_pending_does_not_queue_it_twice(tmp_path: 
     world.share(message_id=43)
     world.cycle()
 
-    assert [path for path in world.kb_files() if path.startswith("entries/")] == [f"entries/{SHORTCODE}.md"]
+    assert sorted(path for path in world.kb_files() if path.startswith("entries/")) == [f"entries/{SHORTCODE}.jpg", f"entries/{SHORTCODE}.md"]
     assert world.inbox.reactions == [(42, "✅", None)]
     assert load_state(tmp_path).pending == []
 
@@ -596,7 +600,7 @@ def test_a_reel_whose_entry_was_written_just_before_a_crash_is_still_added_on_re
 
     assert load_state(tmp_path).pending == []
     assert world.inbox.reactions[-1] == (42, "✅", None)
-    assert [path for path in world.kb_files() if path.startswith("entries/")] == [f"entries/{SHORTCODE}.md"]
+    assert sorted(path for path in world.kb_files() if path.startswith("entries/")) == [f"entries/{SHORTCODE}.jpg", f"entries/{SHORTCODE}.md"]
 
 
 def test_a_broken_categories_file_fails_the_cycle_without_using_up_the_reels_attempts(tmp_path: Path) -> None:
@@ -667,3 +671,31 @@ def test_the_log_lists_a_repeat_share_as_skipped(tmp_path: Path, caplog: pytest.
         f"skipped {OTHER_SHORTCODE}: already queued",
         f"failed {OTHER_SHORTCODE}, attempt 2/3, will retry: TimeoutError: Groq timed out",
     ]
+
+
+def test_the_reels_cover_is_saved_next_to_its_entry(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert (tmp_path / "entries" / f"{SHORTCODE}.jpg").read_bytes() == FakeCoverMaker.cover_for(SHORTCODE)
+
+
+def test_a_cover_failure_still_adds_the_reel_and_only_logs_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    world.cover_maker.fail_next(RuntimeError("cover URL expired"))
+
+    world.cycle()
+
+    assert (tmp_path / "entries" / f"{SHORTCODE}.md").exists()
+    assert not (tmp_path / "entries" / f"{SHORTCODE}.jpg").exists()
+    state = load_state(tmp_path)
+    assert state.processed == {SHORTCODE}
+    assert state.pending == [] and state.failed == []
+    assert world.inbox.reactions == [(42, "✅", None)]
+    assert reel_log(caplog) == [f"queued {SHORTCODE}", f"processed {SHORTCODE} into coding-agents"]
+    [warning] = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert SHORTCODE in warning.getMessage()

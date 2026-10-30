@@ -77,6 +77,7 @@ class HikerReelSource:
             creator=(media.get("user") or {}).get("username") or "",
             caption=media.get("caption_text") or "",
             video_path=video_path,
+            cover_url=_cover_url(media),
         )
 
 
@@ -84,6 +85,11 @@ def _video_url(media: dict[str, Any]) -> str | None:
     """The reel's own video, or for a carousel post (a /p/ link) its first video."""
     candidates = [media, *(media.get("resources") or [])]
     return next((item["video_url"] for item in candidates if item.get("video_url")), None)
+
+
+def _cover_url(media: dict[str, Any]) -> str | None:
+    candidates = [media, *(media.get("resources") or [])]
+    return next((str(item["thumbnail_url"]) for item in candidates if item.get("thumbnail_url")), None)
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -115,4 +121,5 @@ def yt_dlp_fetch(url: str, download_dir: Path) -> Reel:
         creator=info.get("channel") or info.get("uploader") or "",
         caption=info.get("description") or "",
         video_path=video_path,
+        cover_url=info.get("thumbnail") or None,
     )
