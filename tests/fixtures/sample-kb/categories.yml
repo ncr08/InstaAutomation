@@ -1,0 +1,14 @@
+# Every reel's entry is filed under one of these categories. Edit freely: the slug on the left (lowercase, words
+# joined by hyphens) and a description that tells the summarizer what belongs there. Order is the order in the
+# index. Existing entries keep their category; one that is no longer listed shows up under Other.
+# "other" is always available, even if it's not listed.
+coding-agents: Claude Code, Cursor, Codex and other coding agents - setup, settings, permissions, hooks, skills, workflows
+context-and-memory: CLAUDE.md, project memory, context windows and keeping an assistant on track
+prompting: Writing better prompts and instructions for any model
+agents-and-automation: Building agents, MCP servers, integrations and automated workflows
+models-and-costs: Choosing models, running local models, pricing and limits
+content-creation: Images, video, voice and design with AI
+writing-and-research: Writing, summarising, research and learning with AI
+productivity: Email, notes, meetings, documents and everyday work with AI
+new-tools: New AI tools and apps worth trying
+other: Anything that fits no other category

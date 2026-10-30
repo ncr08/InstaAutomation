@@ -29,7 +29,7 @@ testpaths = ["tests"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts/install_claude.py"]
 
 [[tool.mypy.overrides]]
 # yt-dlp ships no type information.
