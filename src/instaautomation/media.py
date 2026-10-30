@@ -4,6 +4,11 @@ import re
 import subprocess
 from pathlib import Path
 
+# Peaks quieter than this are a silent track: Whisper would only invent words for it.
+SILENT_BELOW_DB = -50.0
+# Words tesseract is less sure of than this are mostly misreads of backgrounds and faces.
+MIN_WORD_CONFIDENCE = 60
+
 
 class ToolError(RuntimeError):
     """A media tool is missing, failed, or took too long."""
@@ -21,10 +26,6 @@ def run_tool(args: list[str], timeout: float = 300, *, stderr: bool = False) -> 
         last_line = (result.stderr.strip().splitlines() or ["no output"])[-1]
         raise ToolError(f"{args[0]} failed: {last_line[:120]}")
     return result.stderr if stderr else result.stdout
-
-
-# Peaks quieter than this are a silent track: Whisper would only invent words for it.
-SILENT_BELOW_DB = -50.0
 
 
 def extract_audio(video_path: Path, out_dir: Path) -> Path | None:
@@ -51,10 +52,6 @@ def sample_frames(video_path: Path, out_dir: Path, every_seconds: float) -> list
     pattern = out_dir / "frame-%05d.png"
     run_tool(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(video_path), "-vf", f"fps=1/{every_seconds},format=gray", str(pattern)])
     return sorted(out_dir.glob("frame-*.png"))
-
-
-# Words tesseract is less sure of than this are mostly misreads of backgrounds and faces.
-MIN_WORD_CONFIDENCE = 60
 
 
 def ocr(image: Path) -> str:

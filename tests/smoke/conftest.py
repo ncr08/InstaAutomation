@@ -3,10 +3,12 @@
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
-
 from PIL import Image, ImageDraw, ImageFont
+
+Audio = Literal["speech", "silence", "none"]
 
 SPEECH = "Open your settings file and add the allowlist."
 # (text on screen, seconds shown): a held caption, then a command typed out over two frames.
@@ -18,11 +20,11 @@ SCREENS = [
 
 
 @pytest.fixture
-def sample_reel(tmp_path: Path) -> Callable[[str], Path]:
+def sample_reel(tmp_path: Path) -> Callable[[Audio], Path]:
     return lambda audio: build_sample_reel(tmp_path, audio)
 
 
-def build_sample_reel(out_dir: Path, audio: str) -> Path:
+def build_sample_reel(out_dir: Path, audio: Audio) -> Path:
     """A 10-second reel; `audio` is "speech", "silence" (a silent track) or "none" (no audio track)."""
     concat = out_dir / "frames.txt"
     entries = []

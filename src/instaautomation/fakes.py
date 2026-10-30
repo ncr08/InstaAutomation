@@ -48,6 +48,9 @@ class FakeReelSource(_Failable):
         super().__init__()
         self._reels = {reel.url: reel for reel in reels or []}
 
+    def add(self, reel: Reel) -> None:
+        self._reels[reel.url] = reel
+
     def fetch(self, url: str) -> Reel:
         self._maybe_fail()
         return self._reels[url]

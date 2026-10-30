@@ -78,6 +78,14 @@ def test_fetches_from_the_persisted_offset_in_one_call() -> None:
     assert telegram.calls_to("getUpdates")[0]["offset"] == 6
 
 
+def test_every_update_since_the_offset_comes_back_oldest_first() -> None:
+    telegram = FakeTelegram([text_update(5, "seen"), text_update(6, "reel one"), text_update(7, "chat"), text_update(8, "reel two")])
+
+    messages = inbox_for(telegram).fetch_messages(6)
+
+    assert [m.text for m in messages] == ["reel one", "chat", "reel two"]
+
+
 def test_stranger_text_never_reaches_the_core_but_still_advances_the_offset() -> None:
     telegram = FakeTelegram([text_update(7, "https://www.instagram.com/reel/SPAM/", sender=STRANGER_ID)])
 

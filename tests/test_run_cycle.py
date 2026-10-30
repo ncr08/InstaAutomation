@@ -23,6 +23,8 @@ VIDEO = Path("/videos/DAbc123XyZ.mp4")
 OTHER_SHORTCODE = "DXyz789AbC"
 OTHER_VIDEO = Path(f"/videos/{OTHER_SHORTCODE}.mp4")
 OTHER_LINK = f"https://www.instagram.com/reel/{OTHER_SHORTCODE}/"
+THIRD_SHORTCODE = "DQrs456TuV"
+THIRD_LINK = f"https://www.instagram.com/p/{THIRD_SHORTCODE}/"
 
 SECTIONS = [
     "Summary",
@@ -199,6 +201,26 @@ def test_update_offset_persists_so_a_later_cycle_does_not_refetch_the_same_messa
 
     assert world.inbox.reactions == [(42, "✅", None)]
     assert load_state(tmp_path).offset == 501
+
+
+def test_every_reel_shared_since_the_last_cycle_is_processed_not_just_the_latest(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.reel_source.add(Reel(url=THIRD_LINK, shortcode=THIRD_SHORTCODE, creator="x", caption="", video_path=OTHER_VIDEO))
+    world.share(message_id=42)
+    world.cycle()
+
+    # Hours pass between scheduled cycles; several reels and some chatter pile up in the chat.
+    world.summarizer.draft = replace(
+        DRAFT,
+        topic=TopicDecision(target=ExistingTopic(slug="slow-permission-prompts"), approach="Allowlist", body="Merged."),
+    )
+    world.share(message_id=43, text=OTHER_LINK)
+    world.share(message_id=44, text="saw this one earlier")
+    world.share(message_id=45, text=THIRD_LINK)
+    world.cycle()
+
+    assert sorted(path.stem for path in (tmp_path / "entries").glob("*.md")) == sorted([SHORTCODE, OTHER_SHORTCODE, THIRD_SHORTCODE])
+    assert world.inbox.reactions == [(42, "✅", None), (43, "✅", None), (45, "✅", None)]
 
 
 def test_messages_from_anyone_but_the_owner_are_ignored(tmp_path: Path) -> None:

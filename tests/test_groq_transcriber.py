@@ -97,3 +97,15 @@ def test_a_groq_error_is_a_short_failure_without_the_key() -> None:
         transcriber_for(FakeGroq(status=429)).transcribe(VIDEO)
 
     assert "gsk-secret" not in str(raised.value)
+
+
+def test_a_transcript_of_only_music_symbols_is_empty() -> None:
+    assert transcriber_for(FakeGroq([segment(" ♪"), segment(" ♪ ♪")])).transcribe(VIDEO) == ""
+
+
+def test_a_response_without_segments_falls_back_to_its_text() -> None:
+    class TextOnlyGroq(FakeGroq):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"text": " Use hooks."})
+
+    assert transcriber_for(TextOnlyGroq()).transcribe(VIDEO) == "Use hooks."

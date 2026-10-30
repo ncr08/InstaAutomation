@@ -49,3 +49,21 @@ def test_a_short_line_is_not_lost_inside_a_longer_word() -> None:
     reader = reader_showing("Verify each claim", "AI")
 
     assert reader.read(VIDEO) == "Verify each claim\nAI"
+
+
+def test_list_items_that_share_a_prefix_are_all_kept() -> None:
+    reader = reader_showing("Step 1: open settings\nStep 12: restart")
+
+    assert reader.read(VIDEO) == "Step 1: open settings\nStep 12: restart"
+
+
+def test_a_heading_shown_on_its_own_is_kept_after_a_longer_line_containing_it() -> None:
+    reader = reader_showing("3 tips for Claude Code", "Claude Code")
+
+    assert reader.read(VIDEO) == "3 tips for Claude Code\nClaude Code"
+
+
+def test_a_short_item_on_screen_alongside_a_longer_one_is_not_mistaken_for_typing() -> None:
+    reader = reader_showing("Step 1", "Step 1\nStep 12")
+
+    assert reader.read(VIDEO) == "Step 1\nStep 12"

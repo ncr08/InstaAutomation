@@ -1,6 +1,7 @@
 """Transcriber adapter over Groq's hosted Whisper."""
 
 import logging
+import os
 import re
 import tempfile
 from collections.abc import Callable
@@ -28,10 +29,19 @@ class TranscriptionError(RuntimeError):
 
 
 class GroqTranscriber:
-    def __init__(self, api_key: str, client: httpx.Client | None = None, extract_audio: AudioExtractor | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        client: httpx.Client | None = None,
+        extract_audio: AudioExtractor | None = None,
+    ) -> None:
         self._api_key = api_key
         self._client = client or httpx.Client(timeout=120)
         self._extract_audio = extract_audio or media.extract_audio
+
+    @classmethod
+    def from_env(cls) -> "GroqTranscriber":
+        return cls(api_key=os.environ["GROQ_API_KEY"])
 
     def transcribe(self, video_path: Path) -> str:
         with tempfile.TemporaryDirectory(prefix="audio-") as work_dir:
@@ -50,8 +60,15 @@ class GroqTranscriber:
         if response.status_code != 200:
             raise TranscriptionError(f"Groq {response.status_code}: {_error_message(response)}")
         body: dict[str, Any] = response.json()
-        transcript = " ".join(segment["text"].strip() for segment in body["segments"]).strip()
-        return "" if _normalised(transcript) in STOCK_PHRASES else transcript
+        if "segments" in body:
+            transcript = " ".join(segment["text"].strip() for segment in body["segments"]).strip()
+        elif "text" in body:
+            transcript = body["text"].strip()
+        else:
+            raise TranscriptionError("Groq response has no transcript")
+        key = _stock_phrase_key(transcript)
+        # Nothing but symbols (♪) or a stock phrase means Whisper heard music or silence, not speech.
+        return "" if not key or key in STOCK_PHRASES else transcript
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -63,5 +80,5 @@ def _error_message(response: httpx.Response) -> str:
     return str(message)[:120]
 
 
-def _normalised(text: str) -> str:
+def _stock_phrase_key(text: str) -> str:
     return re.sub(r"[^a-z ]+", "", text.lower()).strip()
