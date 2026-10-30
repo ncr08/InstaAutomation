@@ -29,7 +29,7 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
     categories = load_categories(kb_dir)
     for item in list(state.pending):
         try:
-            _process(ports, kb_dir, item, categories)
+            category = _process(ports, kb_dir, item, categories)
         except Exception as error:
             item.attempts += 1
             item.last_error = _one_line(error)
@@ -39,11 +39,15 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
                 state.failed.append(item)
             save_state(kb_dir, state)
             if gave_up:
+                log.info("failed %s, gave up after %d attempts: %s", item.shortcode, item.attempts, item.last_error)
                 _react(ports.inbox, item.ref, FAILED, item.last_error)
+            else:
+                log.info("failed %s, attempt %d/%d, will retry: %s", item.shortcode, item.attempts, MAX_ATTEMPTS, item.last_error)
         else:
             state.pending.remove(item)
             state.processed.add(item.shortcode)
             save_state(kb_dir, state)
+            log.info("processed %s into %s", item.shortcode, category)
             _react(ports.inbox, item.ref, ADDED)
     _regenerate_navigation(kb_dir)
 
@@ -75,15 +79,18 @@ def _enqueue(inbox: Inbox, state: State, owner_id: int) -> list[MessageRef]:
             continue
         kind, shortcode = match.groups()
         if shortcode in state.processed:
+            log.info("skipped %s: already added", shortcode)
             already_added.append(message.ref)
             continue
         if any(item.shortcode == shortcode for item in state.pending):
             # Already queued: the original message gets the reaction once it is processed.
+            log.info("skipped %s: already queued", shortcode)
             continue
         # A resent failed reel gets a fresh set of attempts.
         state.failed = [item for item in state.failed if item.shortcode != shortcode]
         url = f"https://www.instagram.com/{kind}/{shortcode}/"
         state.pending.append(QueueItem(shortcode=shortcode, url=url, ref=message.ref))
+        log.info("queued %s", shortcode)
     if messages:
         state.offset = max(message.update_id for message in messages) + 1
     return already_added
@@ -97,7 +104,8 @@ def _react(inbox: Inbox, ref: MessageRef, emoji: str, reason: str | None = None)
         log.warning("could not react %s to message %s", emoji, ref.message_id, exc_info=True)
 
 
-def _process(ports: Ports, kb_dir: Path, item: QueueItem, categories: dict[str, str]) -> None:
+def _process(ports: Ports, kb_dir: Path, item: QueueItem, categories: dict[str, str]) -> str:
+    """Writes the reel's entry; returns the category it was filed under."""
     reel = ports.reel_source.fetch(item.url)
     transcript = ports.transcriber.transcribe(reel.video_path)
     on_screen_text = ports.screen_reader.read(reel.video_path)
@@ -115,6 +123,7 @@ def _process(ports: Ports, kb_dir: Path, item: QueueItem, categories: dict[str, 
     entry_path = kb_dir / "entries" / f"{reel.shortcode}.md"
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_text(render_entry(reel, draft, date_added, transcript, on_screen_text))
+    return draft.category
 
 
 class MalformedSummary(ValueError):

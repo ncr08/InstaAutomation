@@ -1,0 +1,51 @@
+name: cycle
+
+on:
+  schedule:
+    - cron: "0 */8 * * *"
+  workflow_dispatch:
+
+# Never two cycles at once, and never cancel one mid-run: its queue state would be lost.
+concurrency:
+  group: kb-cycle
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    # A hung run would otherwise hold the concurrency lock for six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # The adapters shell out to ffmpeg/ffprobe (audio, frames) and tesseract (on-screen text).
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg tesseract-ocr
+      - run: uv sync --locked --no-dev
+      - name: Run one cycle
+        run: uv run --no-dev python -m instaautomation kb
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+          HIKERAPI_KEY: ${{ secrets.HIKERAPI_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      # Also after a failed cycle: the queue and Telegram offset are saved as the cycle goes,
+      # and Telegram drops messages once the offset moves past them.
+      - name: Commit knowledge-base changes
+        if: always()
+        run: |
+          [ -d kb ] || exit 0
+          git add kb
+          if git diff --cached --quiet; then
+            echo "No knowledge-base changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Knowledge base: cycle ${{ github.run_number }}"
+          # Someone may have pushed to main during the run.
+          git pull --rebase
+          git push

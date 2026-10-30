@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -609,3 +610,59 @@ def test_a_broken_categories_file_fails_the_cycle_without_using_up_the_reels_att
     [item] = load_state(tmp_path).pending
     assert item.attempts == 0
     assert world.summarizer.requests == []
+
+
+def reel_log(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The per-reel lines a run prints, the outcome word first, for reading in the Actions log."""
+    return [record.getMessage() for record in caplog.records if record.name == "instaautomation.pipeline" and record.levelno == logging.INFO]
+
+
+def test_the_log_lists_a_new_reel_as_queued_then_processed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert reel_log(caplog) == [
+        f"queued {SHORTCODE}",
+        f"processed {SHORTCODE} into coding-agents",
+    ]
+
+
+def test_the_log_lists_each_failed_attempt_and_the_reel_given_up_on(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    world.transcriber.fail_next(TimeoutError("Groq timed out"), times=3)
+
+    for _ in range(3):
+        world.cycle()
+
+    assert reel_log(caplog) == [
+        f"queued {SHORTCODE}",
+        f"failed {SHORTCODE}, attempt 1/3, will retry: TimeoutError: Groq timed out",
+        f"failed {SHORTCODE}, attempt 2/3, will retry: TimeoutError: Groq timed out",
+        f"failed {SHORTCODE}, gave up after 3 attempts: TimeoutError: Groq timed out",
+    ]
+
+
+def test_the_log_lists_a_repeat_share_as_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    world.cycle()
+    world.transcriber.fail_next(TimeoutError("Groq timed out"))
+    world.share(message_id=43, text=OTHER_LINK)
+    world.cycle()
+    caplog.set_level(logging.INFO)
+
+    world.share(message_id=44)
+    world.share(message_id=45, text=OTHER_LINK)
+    world.transcriber.fail_next(TimeoutError("Groq timed out"))
+    world.cycle()
+
+    assert reel_log(caplog) == [
+        f"skipped {SHORTCODE}: already added",
+        f"skipped {OTHER_SHORTCODE}: already queued",
+        f"failed {OTHER_SHORTCODE}, attempt 2/3, will retry: TimeoutError: Groq timed out",
+    ]
