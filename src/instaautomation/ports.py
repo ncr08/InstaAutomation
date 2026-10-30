@@ -7,11 +7,22 @@ from typing import Protocol
 
 
 @dataclass(frozen=True)
+class MessageRef:
+    chat_id: int
+    message_id: int
+
+
+@dataclass(frozen=True)
 class Message:
+    update_id: int
     message_id: int
     chat_id: int
     sender_id: int
     text: str
+
+    @property
+    def ref(self) -> MessageRef:
+        return MessageRef(chat_id=self.chat_id, message_id=self.message_id)
 
 
 @dataclass(frozen=True)
@@ -46,9 +57,13 @@ class EntryDraft:
 
 
 class Inbox(Protocol):
-    def fetch_messages(self) -> list[Message]: ...
+    def fetch_messages(self, offset: int) -> list[Message]:
+        """Messages whose update_id is at least `offset`, oldest first."""
+        ...
 
-    def react(self, message: Message, emoji: str) -> None: ...
+    def react(self, ref: MessageRef, emoji: str, reason: str | None = None) -> None:
+        """React to a message; `reason` is a one-line explanation shown alongside a failure."""
+        ...
 
 
 class ReelSource(Protocol):
