@@ -58,14 +58,15 @@ class HikerReelSource:
     def _fetch_from_hikerapi(self, url: str) -> Reel:
         response = self._client.get(f"{HIKERAPI_BASE}{MEDIA_BY_URL}", params={"url": url}, headers={AUTH_HEADER: self._api_key})
         if response.status_code != 200:
-            raise ReelSourceError(f"{response.status_code} {_detail(response)}")
+            raise ReelSourceError(f"{response.status_code} {_error_detail(response)}")
         media = response.json()
         shortcode = media["code"]
-        if not media.get("video_url"):
+        video_url = _video_url(media)
+        if not video_url:
             raise NotAVideo(f"post {shortcode} has no video")
         video_path = self._download_dir / f"{shortcode}.mp4"
-        # A plain client, so the HikerAPI key never goes to Instagram's CDN.
-        with self._client.stream("GET", media["video_url"]) as video:
+        # No auth header here: the HikerAPI key is sent per request, so it never goes to Instagram's CDN.
+        with self._client.stream("GET", video_url) as video:
             video.raise_for_status()
             with video_path.open("wb") as file:
                 for chunk in video.iter_bytes():
@@ -79,12 +80,19 @@ class HikerReelSource:
         )
 
 
-def _detail(response: httpx.Response) -> str:
+def _video_url(media: dict[str, Any]) -> str | None:
+    """The reel's own video, or for a carousel post (a /p/ link) its first video."""
+    candidates = [media, *(media.get("resources") or [])]
+    return next((item["video_url"] for item in candidates if item.get("video_url")), None)
+
+
+def _error_detail(response: httpx.Response) -> str:
     try:
         body: Any = response.json()
     except ValueError:
-        return response.text[:100]
-    return str(body.get("detail", body)) if isinstance(body, dict) else str(body)[:100]
+        body = response.text
+    detail = body.get("detail", body) if isinstance(body, dict) else body
+    return str(detail)[:100]
 
 
 def yt_dlp_fetch(url: str, download_dir: Path) -> Reel:

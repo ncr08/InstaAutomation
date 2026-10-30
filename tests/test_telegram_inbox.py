@@ -2,13 +2,14 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
 from instaautomation.ports import Message, MessageRef
-from instaautomation.telegram import TelegramInbox
+from instaautomation.telegram import TelegramError, TelegramInbox
 
 OWNER_ID = 1001
 STRANGER_ID = 666
-CHAT_ID = 1001
+CHAT_ID = OWNER_ID  # a private chat's ID is the user's ID
 
 
 class FakeTelegram:
@@ -131,9 +132,15 @@ def test_a_rejected_reaction_raises() -> None:
     telegram = FakeTelegram()
     telegram.reject_reactions = True
 
-    try:
+    with pytest.raises(TelegramError, match="REACTION_INVALID"):
         inbox_for(telegram).react(MessageRef(chat_id=CHAT_ID, message_id=50), "✅")
-    except Exception as error:
-        assert "REACTION_INVALID" in str(error)
-    else:
-        raise AssertionError("expected the rejected reaction to raise")
+
+
+def test_the_failure_reason_is_still_sent_when_the_reaction_is_rejected() -> None:
+    telegram = FakeTelegram()
+    telegram.reject_reactions = True
+
+    with pytest.raises(TelegramError):
+        inbox_for(telegram).react(MessageRef(chat_id=CHAT_ID, message_id=50), "❌", "ReelSourceError: not found")
+
+    assert [body["text"] for body in telegram.calls_to("sendMessage")] == ["ReelSourceError: not found"]

@@ -5,10 +5,11 @@ from typing import Any
 
 import httpx
 
+from instaautomation.pipeline import ADDED, FAILED
 from instaautomation.ports import Message, MessageRef
 
 # Bots may only react with Telegram's fixed emoji set, which has neither ✅ nor ❌.
-REACTIONS = {"✅": "👍", "❌": "👎"}
+REACTIONS = {ADDED: "👍", FAILED: "👎"}
 
 
 class TelegramError(RuntimeError):
@@ -46,11 +47,14 @@ class TelegramInbox:
         )
 
     def react(self, ref: MessageRef, emoji: str, reason: str | None = None) -> None:
-        reaction = [{"type": "emoji", "emoji": REACTIONS.get(emoji, emoji)}]
-        self._call("setMessageReaction", {"chat_id": ref.chat_id, "message_id": ref.message_id, "reaction": reaction})
-        if reason:
-            # A reaction can't carry text, so the reason goes in a reply to the shared message.
-            self._call("sendMessage", {"chat_id": ref.chat_id, "text": reason, "reply_parameters": {"message_id": ref.message_id}})
+        reaction = [{"type": "emoji", "emoji": REACTIONS[emoji]}]
+        try:
+            self._call("setMessageReaction", {"chat_id": ref.chat_id, "message_id": ref.message_id, "reaction": reaction})
+        finally:
+            if reason:
+                # A reaction can't carry text, so the reason goes in a reply to the shared message,
+                # and still goes out when the reaction is rejected so a failure is never silent.
+                self._call("sendMessage", {"chat_id": ref.chat_id, "text": reason, "reply_parameters": {"message_id": ref.message_id}})
 
     def _call(self, method: str, payload: dict[str, Any]) -> Any:
         response = self._client.post(f"{self._base}/{method}", json=payload)

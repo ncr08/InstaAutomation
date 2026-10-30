@@ -100,6 +100,19 @@ def test_a_post_without_video_is_a_failure_not_an_empty_reel(tmp_path: Path) -> 
         source_for(FakeHiker(photo), tmp_path).fetch(URL)
 
 
+def test_a_carousel_with_a_video_uses_its_first_video(tmp_path: Path) -> None:
+    carousel = {
+        **MEDIA,
+        "media_type": 8,
+        "video_url": None,
+        "resources": [{"media_type": 1, "video_url": None}, {"media_type": 2, "video_url": VIDEO_URL}],
+    }
+
+    reel = source_for(FakeHiker(carousel), tmp_path).fetch(URL)
+
+    assert reel.video_path.read_bytes() == VIDEO_BYTES
+
+
 def test_when_both_sources_fail_the_error_names_both_reasons(tmp_path: Path) -> None:
     with pytest.raises(ReelSourceError) as raised:
         source_for(FakeHiker(status=404), tmp_path).fetch(URL)
