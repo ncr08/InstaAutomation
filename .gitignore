@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .env
+# Left behind if a run is killed mid-write of the state file.
+kb/*.tmp

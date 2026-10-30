@@ -46,6 +46,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Knowledge base: cycle ${{ github.run_number }}"
-          # Someone may have pushed to main during the run.
-          git pull --rebase
-          git push
+          # Someone may have pushed to main during the run; a lost push race is retried.
+          for attempt in 1 2 3; do
+            if git pull --rebase && git push; then exit 0; fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 10))
+          done
+          echo "::error::Could not push knowledge-base changes; the next run starts from the last pushed state."
+          exit 1

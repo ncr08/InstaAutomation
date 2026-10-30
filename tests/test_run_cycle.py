@@ -654,6 +654,7 @@ def test_the_log_lists_a_repeat_share_as_skipped(tmp_path: Path, caplog: pytest.
     world.transcriber.fail_next(TimeoutError("Groq timed out"))
     world.share(message_id=43, text=OTHER_LINK)
     world.cycle()
+    # Only now: the cycles above just set the scene.
     caplog.set_level(logging.INFO)
 
     world.share(message_id=44)
