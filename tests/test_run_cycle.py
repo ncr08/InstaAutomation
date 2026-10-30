@@ -212,7 +212,9 @@ def test_every_reel_shared_since_the_last_cycle_is_processed_not_just_the_latest
     # Hours pass between scheduled cycles; several reels and some chatter pile up in the chat.
     world.summarizer.draft = replace(
         DRAFT,
-        topic=TopicDecision(target=ExistingTopic(slug="slow-permission-prompts"), approach="Allowlist", body="Merged."),
+        topic=TopicDecision(
+            target=ExistingTopic(slug="slow-permission-prompts"), approach="Allowlist", body=f"{DRAFT.topic.body}\n\nMerged."
+        ),
     )
     world.share(message_id=43, text=OTHER_LINK)
     world.share(message_id=44, text="saw this one earlier")
@@ -461,7 +463,7 @@ def test_a_reel_on_a_known_problem_is_merged_into_the_existing_topic(tmp_path: P
         topic=TopicDecision(
             target=ExistingTopic(slug="slow-permission-prompts"),
             approach="Allowlist read-only commands in project settings",
-            body="Prefer `.claude/settings.json` in the project so the allowlist travels with the repo.",
+            body=f"{DRAFT.topic.body}\n\nPrefer `.claude/settings.json` in the project so the allowlist travels with the repo.",
         ),
     )
     world.share(message_id=43, text=OTHER_LINK)
@@ -485,13 +487,64 @@ def test_a_reel_on_a_known_problem_is_merged_into_the_existing_topic(tmp_path: P
     assert f"(../entries/{OTHER_SHORTCODE}.md)" in body
 
 
+def test_a_merge_may_reorganise_the_topic_as_long_as_every_command_is_kept(tmp_path: Path) -> None:
+    write_topic_file(
+        tmp_path,
+        "slow-permission-prompts",
+        reels=1,
+        updated="2026-10-01",
+        body="Run `claude config list` first.\n\n```json\n{\"permissions\": {\"allow\": [\"Bash(git status)\"]}}\n```",
+    )
+    topic_path = tmp_path / "topics" / "slow-permission-prompts.md"
+    world = make_world(tmp_path)
+    world.summarizer.draft = replace(
+        DRAFT,
+        topic=TopicDecision(
+            target=ExistingTopic(slug="slow-permission-prompts"),
+            approach="Allowlist read-only commands",
+            body="## Allowlist\n\n```\nclaude config list\n```\n\nThen allow "
+            '`{"permissions": {"allow": ["Bash(git status)"]}}`.',
+        ),
+    )
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+    assert "## Allowlist" in topic_path.read_text()
+
+
+def test_a_stray_backtick_in_the_topic_does_not_block_merges_into_it(tmp_path: Path) -> None:
+    write_topic_file(
+        tmp_path,
+        "slow-permission-prompts",
+        reels=1,
+        updated="2026-10-01",
+        body="Don`t allowlist everything.\n\nRun `claude config list` to see the current rules.",
+    )
+    world = make_world(tmp_path)
+    world.summarizer.draft = replace(
+        DRAFT,
+        topic=TopicDecision(
+            target=ExistingTopic(slug="slow-permission-prompts"),
+            approach="Allowlist read-only commands",
+            body="Do not allowlist everything.\n\nCheck the current rules with `claude config list`.",
+        ),
+    )
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+
+
 def merge_other_reel_into_existing_topic(world: World) -> None:
     world.summarizer.draft = replace(
         DRAFT,
         topic=TopicDecision(
             target=ExistingTopic(slug="slow-permission-prompts"),
             approach="Allowlist read-only commands in project settings",
-            body="Merged guidance.",
+            body=f"{DRAFT.topic.body}\n\nMerged guidance.",
         ),
     )
     world.share(message_id=43, text=OTHER_LINK)
@@ -517,8 +570,19 @@ def test_a_user_set_pinned_flag_survives_a_topic_rewrite(tmp_path: Path) -> None
     [
         TopicDecision(target=ExistingTopic(slug="no-such-topic"), approach="Something", body="Guidance."),
         replace(DRAFT.topic, body="A rewrite that never saw the existing guidance."),
+        TopicDecision(
+            target=ExistingTopic(slug="slow-permission-prompts"),
+            approach="Allowlist read-only commands",
+            body="Add safe, read-only commands to the allowlist so they run without a prompt. "
+            "Prefer `.claude/settings.json` in the project.",
+        ),
+        TopicDecision(
+            target=ExistingTopic(slug="slow-permission-prompts"),
+            approach="Allowlist read-only commands",
+            body="Use `permissions.allow`.",
+        ),
     ],
-    ids=["existing-topic-missing", "new-topic-already-exists"],
+    ids=["existing-topic-missing", "new-topic-already-exists", "merge-drops-a-command", "merge-shrinks-the-topic"],
 )
 def test_a_topic_decision_that_contradicts_the_kb_is_a_failure(tmp_path: Path, decision: TopicDecision) -> None:
     world = make_world(tmp_path)
@@ -550,13 +614,15 @@ def test_the_index_lists_every_topic_and_is_given_to_the_summarizer(tmp_path: Pa
     assert "[Slow permission prompts](topics/slow-permission-prompts.md)" in world.summarizer.requests[-1].index
 
 
-def write_topic_file(kb_dir: Path, slug: str, *, reels: int, updated: str, pinned: bool = False) -> None:
+def write_topic_file(
+    kb_dir: Path, slug: str, *, reels: int, updated: str, pinned: bool = False, body: str | None = None
+) -> None:
     path = kb_dir / "topics" / f"{slug}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     entries = "".join(f"- {slug}{n}\n" for n in range(reels))
     path.write_text(
         f"---\nslug: {slug}\ntitle: Title of {slug}\nproblem: Problem of {slug}\napproach: Approach of {slug}\n"
-        f"pinned: {str(pinned).lower()}\nentries:\n{entries}updated: '{updated}'\n---\n\nGuidance for {slug}.\n"
+        f"pinned: {str(pinned).lower()}\nentries:\n{entries}updated: '{updated}'\n---\n\n{body or f"Guidance for {slug}."}\n"
     )
 
 

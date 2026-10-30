@@ -15,6 +15,12 @@ ADDED = "✅"
 FAILED = "❌"
 MAX_ATTEMPTS = 3
 TOPIC_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# The language tag after the opening fence isn't code.
+FENCED_CODE = re.compile(r"^ *(`{3,}|~{3,})[^\n]*\n(.*?)^ *\1[`~]*[ \t]*$", re.DOTALL | re.MULTILINE)
+# Kept to one line, so a stray backtick (an apostrophe typed as `) can't pair with code paragraphs away.
+INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)")
+# A merged topic body shorter than this share of the old one has lost guidance.
+MIN_MERGED_LENGTH_RATIO = 0.7
 
 log = logging.getLogger(__name__)
 
@@ -175,10 +181,34 @@ def _check_decision(decision: TopicDecision, topics: dict[str, Topic], shortcode
             raise MalformedSummary(f"topic {name} must be a single line of text")
     if not _is_text(decision.body):
         raise MalformedSummary("topic body must be non-empty text")
-    if isinstance(target, ExistingTopic) and target.slug not in topics:
-        raise MalformedSummary(f"existing topic does not exist: {target.slug}")
+    if isinstance(target, ExistingTopic):
+        if target.slug not in topics:
+            raise MalformedSummary(f"existing topic does not exist: {target.slug}")
+        _check_merge_keeps_guidance(topics[target.slug].body, decision.body)
     if isinstance(target, NewTopic) and target.slug in topics and shortcode not in topics[target.slug].entries:
         raise MalformedSummary(f"new topic already exists: {target.slug}")
+
+
+def _check_merge_keeps_guidance(old: str, new: str) -> None:
+    """A merge replaces the topic body wholesale, so catch rewrites that drop earlier reels' guidance.
+
+    Commands and config are the most valuable part and survive any rewording, so each must still be there;
+    a body much shorter than before has lost prose. Small prose losses still get through.
+    """
+    missing = [snippet for snippet in _code_snippets(old) if snippet not in new]
+    if missing:
+        raise MalformedSummary(f"topic merge dropped code from {len(missing)} place(s), e.g. {missing[0][:60]!r}")
+    if len(new.strip()) < MIN_MERGED_LENGTH_RATIO * len(old.strip()):
+        raise MalformedSummary(f"topic merge shrank the topic from {len(old.strip())} to {len(new.strip())} characters")
+
+
+def _code_snippets(markdown: str) -> list[str]:
+    """Inline code spans and the lines of fenced code blocks."""
+    blocks = [match.group(2) for match in FENCED_CODE.finditer(markdown)]
+    lines = [line.strip() for block in blocks for line in block.splitlines() if line.strip()]
+    prose = FENCED_CODE.sub("", markdown)
+    spans = [match.group(2).strip() for match in INLINE_CODE.finditer(prose) if match.group(2).strip()]
+    return lines + spans
 
 
 def _is_text(value: object) -> bool:
