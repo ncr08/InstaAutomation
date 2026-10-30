@@ -7,7 +7,9 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
     "pyyaml>=6.0.3",
+    "yt-dlp>=2026.10.26",
 ]
 
 [build-system]
@@ -27,3 +29,8 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# yt-dlp ships no type information.
+module = ["yt_dlp", "yt_dlp.*"]
+ignore_missing_imports = true
