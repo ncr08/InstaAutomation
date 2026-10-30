@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from instaautomation.categories import CATEGORIES_FILE
 from instaautomation.fakes import (
     FakeInbox,
     FakeReelSource,
@@ -15,7 +16,7 @@ from instaautomation.fakes import (
     FixedClock,
 )
 from instaautomation.pipeline import run_cycle
-from instaautomation.ports import EntryDraft, ExistingTopic, Message, NewTopic, Ports, Reel, TopicDecision
+from instaautomation.ports import EntryDraft, Message, Ports, Reel
 from instaautomation.state import STATE_FILE, load_state
 
 OWNER_ID = 1001
@@ -55,6 +56,8 @@ REEL_URL = f"https://www.instagram.com/reel/{SHORTCODE}/"
 SHARED_LINK = f"{REEL_URL}?igsh=MWQ1ZGUxMzBkMA=="
 DRAFT = EntryDraft(
     summary="Allowlist safe commands so Claude Code stops asking.",
+    problem="Claude Code keeps asking for permission on safe commands",
+    approach="Allowlist read-only commands in settings.json",
     technique="Add read-only commands to the permissions allowlist in settings.json.",
     steps=["Open ~/.claude/settings.json", "Add the commands under permissions.allow"],
     prerequisites=["Claude Code installed"],
@@ -62,15 +65,7 @@ DRAFT = EntryDraft(
     caveats=["Never allowlist destructive commands"],
     tools=["Claude Code"],
     tags=["permissions", "productivity"],
-    topic=TopicDecision(
-        target=NewTopic(
-            slug="slow-permission-prompts",
-            title="Slow permission prompts",
-            problem="Claude Code keeps asking for permission on safe commands",
-        ),
-        approach="Allowlist read-only commands in settings.json",
-        body="Add safe, read-only commands to `permissions.allow` so they run without a prompt.",
-    ),
+    category="coding-agents",
 )
 
 
@@ -116,7 +111,8 @@ class World:
         return {
             str(path.relative_to(self.kb_dir)): path.read_bytes()
             for path in self.kb_dir.rglob("*")
-            if path.is_file() and path.name != STATE_FILE
+            # The categories file is the owner's settings, written on the first cycle, not reel content.
+            if path.is_file() and path.name not in {STATE_FILE, CATEGORIES_FILE}
         }
 
 
@@ -168,7 +164,10 @@ def test_owner_shares_a_reel_and_one_cycle_writes_an_entry_and_reacts_ok(tmp_pat
         "shortcode": "DAbc123XyZ",
         "creator": "aitipsdaily",
         "date_added": "2026-10-30",
-        "topic": "slow-permission-prompts",
+        "category": "coding-agents",
+        "problem": "Claude Code keeps asking for permission on safe commands",
+        "approach": "Allowlist read-only commands in settings.json",
+        "pinned": False,
         "tools": ["Claude Code"],
         "tags": ["permissions", "productivity"],
     }
@@ -210,12 +209,6 @@ def test_every_reel_shared_since_the_last_cycle_is_processed_not_just_the_latest
     world.cycle()
 
     # Hours pass between scheduled cycles; several reels and some chatter pile up in the chat.
-    world.summarizer.draft = replace(
-        DRAFT,
-        topic=TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"), approach="Allowlist", body=f"{DRAFT.topic.body}\n\nMerged."
-        ),
-    )
     world.share(message_id=43, text=OTHER_LINK)
     world.share(message_id=44, text="saw this one earlier")
     world.share(message_id=45, text=THIRD_LINK)
@@ -361,10 +354,11 @@ def test_sharing_a_reel_that_is_still_pending_does_not_queue_it_twice(tmp_path: 
         replace(DRAFT, steps=[]),
         replace(DRAFT, tags="permissions"),  # type: ignore[arg-type]
         replace(DRAFT, caveats=[None]),  # type: ignore[list-item]
-        replace(DRAFT, topic=replace(DRAFT.topic, target=replace(DRAFT.topic.target, slug="../../etc/passwd"))),
-        replace(DRAFT, topic=replace(DRAFT.topic, target=replace(DRAFT.topic.target, slug="Slow Permission Prompts"))),
-        replace(DRAFT, topic=replace(DRAFT.topic, approach="Allowlist commands\nand also edit hooks")),
-        replace(DRAFT, topic=replace(DRAFT.topic, body="  ")),
+        replace(DRAFT, problem=""),
+        replace(DRAFT, problem="Prompts\nkeep coming"),
+        replace(DRAFT, approach="Allowlist commands\nand also edit hooks"),
+        replace(DRAFT, category="no-such-category"),
+        replace(DRAFT, category="../../etc/passwd"),
     ],
     ids=[
         "empty-summary",
@@ -372,10 +366,11 @@ def test_sharing_a_reel_that_is_still_pending_does_not_queue_it_twice(tmp_path: 
         "no-steps",
         "tags-not-a-list",
         "non-string-caveat",
-        "path-in-topic",
-        "topic-not-a-slug",
+        "empty-problem",
+        "multi-line-problem",
         "multi-line-approach",
-        "empty-topic-body",
+        "unknown-category",
+        "path-as-category",
     ],
 )
 def test_malformed_summarizer_output_is_a_failure_and_leaves_the_kb_untouched(
@@ -425,233 +420,168 @@ def test_resending_a_failed_reel_takes_it_off_the_failed_list_once_it_succeeds(t
     assert world.inbox.reactions[-1] == (43, "✅", None)
 
 
-def test_a_reel_on_a_new_problem_creates_a_topic_that_links_to_its_entry(tmp_path: Path) -> None:
+def write_categories(kb_dir: Path, text: str) -> None:
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    (kb_dir / CATEGORIES_FILE).write_text(text)
+
+
+def write_entry_file(
+    kb_dir: Path, shortcode: str, *, category: str, date_added: str, pinned: bool = False
+) -> None:
+    path = kb_dir / "entries" / f"{shortcode}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nsource_url: https://www.instagram.com/reel/{shortcode}/\nshortcode: {shortcode}\ncreator: x\n"
+        f"date_added: '{date_added}'\ncategory: {category}\nproblem: Problem of {shortcode}\n"
+        f"approach: Approach of {shortcode}\npinned: {str(pinned).lower()}\ntools: []\ntags: []\n---\n\n## Summary\n\nx\n"
+    )
+
+
+def test_the_first_cycle_writes_the_default_categories_for_the_owner_to_edit(tmp_path: Path) -> None:
     world = make_world(tmp_path)
     world.share(message_id=42)
 
     world.cycle()
 
-    frontmatter, body = read_markdown(tmp_path / "topics" / "slow-permission-prompts.md")
-    assert frontmatter == {
-        "slug": "slow-permission-prompts",
-        "title": "Slow permission prompts",
-        "problem": "Claude Code keeps asking for permission on safe commands",
-        "approach": "Allowlist read-only commands in settings.json",
-        "pinned": False,
-        "entries": [SHORTCODE],
-        "updated": "2026-10-30",
+    categories = yaml.safe_load((tmp_path / CATEGORIES_FILE).read_text())
+    assert "coding-agents" in categories and "other" in categories
+    assert world.summarizer.requests[-1].categories == categories
+
+
+def test_the_summarizer_is_offered_the_owners_categories_plus_other(tmp_path: Path) -> None:
+    write_categories(tmp_path, "# My categories\nprompting: Writing better prompts\nvideo: Making videos with AI\n")
+    world = make_world(tmp_path)
+    world.summarizer.draft = replace(DRAFT, category="video")
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.summarizer.requests[-1].categories == {
+        "prompting": "Writing better prompts",
+        "video": "Making videos with AI",
+        "other": "Anything that fits no other category",
     }
-    assert "Add safe, read-only commands to `permissions.allow`" in body
-    assert f"(../entries/{SHORTCODE}.md)" in body
-    assert f"entries/{SHORTCODE}.md" in world.kb_files()
-    assert "(1 reel, updated 2026-10-30)" in (tmp_path / "index.md").read_text()
-    assert (
-        "- Claude Code keeps asking for permission on safe commands → "
-        "Allowlist read-only commands in settings.json (see topics/slow-permission-prompts.md)"
-    ) in (tmp_path / "claude-block.md").read_text()
+    frontmatter, _ = read_markdown(tmp_path / "entries" / f"{SHORTCODE}.md")
+    assert frontmatter["category"] == "video"
     assert world.inbox.reactions == [(42, "✅", None)]
 
 
-def test_a_reel_on_a_known_problem_is_merged_into_the_existing_topic(tmp_path: Path) -> None:
+def test_a_category_the_owner_does_not_have_is_a_failure(tmp_path: Path) -> None:
+    write_categories(tmp_path, "prompting: Writing better prompts\n")
     world = make_world(tmp_path)
     world.share(message_id=42)
-    world.cycle()
-
-    world.now = datetime(2026, 11, 2, 9, 0, tzinfo=timezone.utc)
-    world.summarizer.draft = replace(
-        DRAFT,
-        topic=TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands in project settings",
-            body=f"{DRAFT.topic.body}\n\nPrefer `.claude/settings.json` in the project so the allowlist travels with the repo.",
-        ),
-    )
-    world.share(message_id=43, text=OTHER_LINK)
-    world.cycle()
-
-    assert world.summarizer.requests[-1].topics == {
-        "slow-permission-prompts": "Add safe, read-only commands to `permissions.allow` so they run without a prompt."
-    }
-    frontmatter, body = read_markdown(tmp_path / "topics" / "slow-permission-prompts.md")
-    assert frontmatter == {
-        "slug": "slow-permission-prompts",
-        "title": "Slow permission prompts",
-        "problem": "Claude Code keeps asking for permission on safe commands",
-        "approach": "Allowlist read-only commands in project settings",
-        "pinned": False,
-        "entries": [SHORTCODE, OTHER_SHORTCODE],
-        "updated": "2026-11-02",
-    }
-    assert "so the allowlist travels with the repo" in body
-    assert f"(../entries/{SHORTCODE}.md)" in body
-    assert f"(../entries/{OTHER_SHORTCODE}.md)" in body
-
-
-def test_a_merge_may_reorganise_the_topic_as_long_as_every_command_is_kept(tmp_path: Path) -> None:
-    write_topic_file(
-        tmp_path,
-        "slow-permission-prompts",
-        reels=1,
-        updated="2026-10-01",
-        body="Run `claude config list` first.\n\n```json\n{\"permissions\": {\"allow\": [\"Bash(git status)\"]}}\n```",
-    )
-    topic_path = tmp_path / "topics" / "slow-permission-prompts.md"
-    world = make_world(tmp_path)
-    world.summarizer.draft = replace(
-        DRAFT,
-        topic=TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands",
-            body="## Allowlist\n\n```\nclaude config list\n```\n\nThen allow "
-            '`{"permissions": {"allow": ["Bash(git status)"]}}`.',
-        ),
-    )
-    world.share(message_id=42)
 
     world.cycle()
 
-    assert world.inbox.reactions == [(42, "✅", None)]
-    assert "## Allowlist" in topic_path.read_text()
-
-
-def test_a_stray_backtick_in_the_topic_does_not_block_merges_into_it(tmp_path: Path) -> None:
-    write_topic_file(
-        tmp_path,
-        "slow-permission-prompts",
-        reels=1,
-        updated="2026-10-01",
-        body="Don`t allowlist everything.\n\nRun `claude config list` to see the current rules.",
-    )
-    world = make_world(tmp_path)
-    world.summarizer.draft = replace(
-        DRAFT,
-        topic=TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands",
-            body="Do not allowlist everything.\n\nCheck the current rules with `claude config list`.",
-        ),
-    )
-    world.share(message_id=42)
-
-    world.cycle()
-
-    assert world.inbox.reactions == [(42, "✅", None)]
-
-
-def merge_other_reel_into_existing_topic(world: World) -> None:
-    world.summarizer.draft = replace(
-        DRAFT,
-        topic=TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands in project settings",
-            body=f"{DRAFT.topic.body}\n\nMerged guidance.",
-        ),
-    )
-    world.share(message_id=43, text=OTHER_LINK)
-    world.cycle()
-
-
-def test_a_user_set_pinned_flag_survives_a_topic_rewrite(tmp_path: Path) -> None:
-    world = make_world(tmp_path)
-    world.share(message_id=42)
-    world.cycle()
-    topic_path = tmp_path / "topics" / "slow-permission-prompts.md"
-    topic_path.write_text(topic_path.read_text().replace("pinned: false", "pinned: true"))
-
-    merge_other_reel_into_existing_topic(world)
-
-    frontmatter, _ = read_markdown(topic_path)
-    assert frontmatter["pinned"] is True
-    assert frontmatter["entries"] == [SHORTCODE, OTHER_SHORTCODE]
-
-
-@pytest.mark.parametrize(
-    "decision",
-    [
-        TopicDecision(target=ExistingTopic(slug="no-such-topic"), approach="Something", body="Guidance."),
-        replace(DRAFT.topic, body="A rewrite that never saw the existing guidance."),
-        TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands",
-            body="Add safe, read-only commands to the allowlist so they run without a prompt. "
-            "Prefer `.claude/settings.json` in the project.",
-        ),
-        TopicDecision(
-            target=ExistingTopic(slug="slow-permission-prompts"),
-            approach="Allowlist read-only commands",
-            body="Use `permissions.allow`.",
-        ),
-    ],
-    ids=["existing-topic-missing", "new-topic-already-exists", "merge-drops-a-command", "merge-shrinks-the-topic"],
-)
-def test_a_topic_decision_that_contradicts_the_kb_is_a_failure(tmp_path: Path, decision: TopicDecision) -> None:
-    world = make_world(tmp_path)
-    world.share(message_id=42)
-    world.cycle()
-    kb_before = world.kb_files()
-
-    world.summarizer.draft = replace(DRAFT, topic=decision)
-    world.share(message_id=43, text=OTHER_LINK)
-    world.cycle()
-
-    assert world.kb_files() == kb_before
+    assert world.kb_files() == {}
     [item] = load_state(tmp_path).pending
-    assert (item.shortcode, item.attempts) == (OTHER_SHORTCODE, 1)
+    assert item.attempts == 1
+    assert "coding-agents" in (item.last_error or "")
 
 
-def test_the_index_lists_every_topic_and_is_given_to_the_summarizer(tmp_path: Path) -> None:
+def test_a_reel_that_fits_no_category_is_filed_under_other(tmp_path: Path) -> None:
     world = make_world(tmp_path)
+    world.summarizer.draft = replace(DRAFT, category="other")
     world.share(message_id=42)
+
     world.cycle()
-    merge_other_reel_into_existing_topic(world)
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+    assert "## Other" in (tmp_path / "index.md").read_text()
+
+
+def test_the_index_lists_every_entry_under_its_category_in_the_owners_order(tmp_path: Path) -> None:
+    write_categories(tmp_path, "video: Making videos\nprompting: Writing better prompts\n")
+    write_entry_file(tmp_path, "DOldPrompt1", category="prompting", date_added="2026-10-01")
+    write_entry_file(tmp_path, "DNewPrompt1", category="prompting", date_added="2026-10-20")
+    write_entry_file(tmp_path, "DVideo00001", category="video", date_added="2026-09-01")
+    write_entry_file(tmp_path, "DStale00001", category="removed-category", date_added="2026-09-01")
+    world = make_world(tmp_path)
+
+    world.cycle()
 
     index = (tmp_path / "index.md").read_text()
-    assert (
-        "- [Slow permission prompts](topics/slow-permission-prompts.md): "
-        "Claude Code keeps asking for permission on safe commands → "
-        "Allowlist read-only commands in project settings (2 reels, updated 2026-10-30)"
-    ) in index
-    assert "[Slow permission prompts](topics/slow-permission-prompts.md)" in world.summarizer.requests[-1].index
+    assert re.findall(r"^## (.+)$", index, re.MULTILINE) == ["Video", "Prompting", "Other"]
+    lines = re.findall(r"^- .*$", index, re.MULTILINE)
+    assert lines == [
+        "- Problem of DVideo00001 → Approach of DVideo00001 ([DVideo00001](entries/DVideo00001.md), 2026-09-01)",
+        "- Problem of DNewPrompt1 → Approach of DNewPrompt1 ([DNewPrompt1](entries/DNewPrompt1.md), 2026-10-20)",
+        "- Problem of DOldPrompt1 → Approach of DOldPrompt1 ([DOldPrompt1](entries/DOldPrompt1.md), 2026-10-01)",
+        "- Problem of DStale00001 → Approach of DStale00001 ([DStale00001](entries/DStale00001.md), 2026-09-01)",
+    ]
+    assert "Writing better prompts" in index
 
 
-def write_topic_file(
-    kb_dir: Path, slug: str, *, reels: int, updated: str, pinned: bool = False, body: str | None = None
-) -> None:
-    path = kb_dir / "topics" / f"{slug}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entries = "".join(f"- {slug}{n}\n" for n in range(reels))
-    path.write_text(
-        f"---\nslug: {slug}\ntitle: Title of {slug}\nproblem: Problem of {slug}\napproach: Approach of {slug}\n"
-        f"pinned: {str(pinned).lower()}\nentries:\n{entries}updated: '{updated}'\n---\n\n{body or f"Guidance for {slug}."}\n"
+def test_a_new_entry_appears_in_the_index_and_the_claude_block(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+
+    world.cycle()
+
+    line = (
+        "- Claude Code keeps asking for permission on safe commands → "
+        "Allowlist read-only commands in settings.json"
     )
+    assert f"{line} ([{SHORTCODE}](entries/{SHORTCODE}.md), 2026-10-30)" in (tmp_path / "index.md").read_text()
+    assert f"{line} (see entries/{SHORTCODE}.md)" in (tmp_path / "claude-block.md").read_text()
 
 
-def test_the_claude_block_ranks_pinned_then_reel_count_then_recency_and_is_capped(tmp_path: Path) -> None:
-    write_topic_file(tmp_path, "pinned-but-rare", reels=1, updated="2026-01-01", pinned=True)
-    write_topic_file(tmp_path, "most-reels", reels=5, updated="2026-02-01")
-    write_topic_file(tmp_path, "three-reels-older", reels=3, updated="2026-10-01")
-    write_topic_file(tmp_path, "three-reels-newer", reels=3, updated="2026-10-20")
-    for day in range(1, 14):
-        write_topic_file(tmp_path, f"single-{day:02d}", reels=1, updated=f"2026-09-{day:02d}")
+def test_the_claude_block_lists_pinned_entries_then_the_newest_of_each_category_in_turn_and_is_capped(
+    tmp_path: Path,
+) -> None:
+    write_categories(tmp_path, "aa: First\nbb: Second\n")
+    write_entry_file(tmp_path, "DPinnedOld1", category="bb", date_added="2026-01-01", pinned=True)
+    for day in range(1, 11):
+        write_entry_file(tmp_path, f"DAa{day:08d}", category="aa", date_added=f"2026-10-{day:02d}")
+        write_entry_file(tmp_path, f"DBb{day:08d}", category="bb", date_added=f"2026-09-{day:02d}")
+    # Same day as the newest aa entry: ties go by shortcode, so the order never depends on the file system.
+    write_entry_file(tmp_path, "DAa00000010x", category="aa", date_added="2026-10-10")
     world = make_world(tmp_path)
 
     world.cycle()
 
     block = (tmp_path / "claude-block.md").read_text()
-    ranked = re.findall(r"^- Problem of (\S+) → Approach of \1 \(see topics/\1\.md\)", block, re.MULTILINE)
+    ranked = re.findall(r"^- Problem of (\S+) → Approach of \1 \(see entries/\1\.md\)", block, re.MULTILINE)
     assert ranked == [
-        "pinned-but-rare",
-        "most-reels",
-        "three-reels-newer",
-        "three-reels-older",
-        *[f"single-{day:02d}" for day in range(13, 2, -1)],
+        "DPinnedOld1",
+        "DAa00000010x",
+        "DBb00000010",
+        "DAa00000010",
+        "DBb00000009",
+        "DAa00000009",
+        "DBb00000008",
+        "DAa00000008",
+        "DBb00000007",
+        "DAa00000007",
+        "DBb00000006",
+        "DAa00000006",
+        "DBb00000005",
+        "DAa00000005",
+        "DBb00000004",
     ]
-    assert len(re.findall(r"^- ", block, re.MULTILINE)) == 15
     last_line = block.strip().splitlines()[-1]
     assert "index.md" in last_line and "/ai-kb" in last_line
 
 
-def test_a_reel_whose_topic_was_written_just_before_a_crash_is_still_added_on_retry(tmp_path: Path) -> None:
+def test_hand_edited_entry_files_are_read_leniently(tmp_path: Path) -> None:
+    path = tmp_path / "entries" / "DHandEdit01.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b"---\r\nshortcode: DHandEdit01\r\ndate_added: 2026-10-01\r\ncategory: coding-agents\r\n"
+        b'problem: Odd YAML\r\napproach: Tolerate it\r\npinned: "false"\r\n---\r\n\r\nBody.\r\n'
+    )
+    write_entry_file(tmp_path, "DPinned0001", category="coding-agents", date_added="2026-01-01", pinned=True)
+    (tmp_path / "entries" / "notes.txt").write_text("not an entry")
+    world = make_world(tmp_path)
+
+    world.cycle()
+
+    block = (tmp_path / "claude-block.md").read_text()
+    assert block.index("Problem of DPinned0001") < block.index("Odd YAML")
+    assert "Odd YAML → Tolerate it ([DHandEdit01](entries/DHandEdit01.md), 2026-10-01)" in (tmp_path / "index.md").read_text()
+
+
+def test_a_reel_whose_entry_was_written_just_before_a_crash_is_still_added_on_retry(tmp_path: Path) -> None:
     world = make_world(tmp_path)
     world.share(message_id=42)
     break_port(world, "transcriber", RuntimeError("Groq timeout"))
@@ -665,102 +595,17 @@ def test_a_reel_whose_topic_was_written_just_before_a_crash_is_still_added_on_re
 
     assert load_state(tmp_path).pending == []
     assert world.inbox.reactions[-1] == (42, "✅", None)
-    frontmatter, _ = read_markdown(tmp_path / "topics" / "slow-permission-prompts.md")
-    assert frontmatter["entries"] == [SHORTCODE]
+    assert [path for path in world.kb_files() if path.startswith("entries/")] == [f"entries/{SHORTCODE}.md"]
 
 
-def test_hand_edited_topic_files_are_read_leniently(tmp_path: Path) -> None:
-    path = tmp_path / "topics" / "hand-edited.md"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(
-        b"---\r\nslug: hand-edited\r\ntitle: Hand edited\r\nproblem: Odd YAML\r\napproach: Tolerate it\r\n"
-        b'pinned: "false"\r\nentries:\r\nupdated: 2026-10-01\r\n---\r\n\r\nGuidance.\r\n'
-    )
-    write_topic_file(tmp_path, "pinned-one", reels=1, updated="2026-01-01", pinned=True)
-    world = make_world(tmp_path)
-
-    world.cycle()
-
-    block = (tmp_path / "claude-block.md").read_text()
-    assert block.index("Problem of pinned-one") < block.index("Odd YAML")
-    assert "(0 reels, updated 2026-10-01)" in (tmp_path / "index.md").read_text()
-
-
-def fill_kb_with_topics(kb_dir: Path, count: int) -> None:
-    for n in range(count):
-        write_topic_file(kb_dir, f"topic-{n:02d}", reels=1, updated="2026-10-01")
-
-
-def file_under(slug: str, body: str = "Guidance.") -> EntryDraft:
-    return replace(DRAFT, topic=TopicDecision(target=ExistingTopic(slug=slug), approach="Allowlist", body=body))
-
-
-def test_new_topics_may_be_created_until_there_are_nine_besides_unsorted(tmp_path: Path) -> None:
-    fill_kb_with_topics(tmp_path, 8)
+def test_a_broken_categories_file_fails_the_cycle_without_using_up_the_reels_attempts(tmp_path: Path) -> None:
+    write_categories(tmp_path, "- prompting\n- video\n")
     world = make_world(tmp_path)
     world.share(message_id=42)
-    world.cycle()
-    assert world.summarizer.requests[-1].can_create_topic is True
 
-    world.summarizer.draft = file_under("unsorted")
-    world.share(message_id=43, text=OTHER_LINK)
-    world.cycle()
+    with pytest.raises(ValueError, match="categories"):
+        world.cycle()
 
-    assert world.summarizer.requests[-1].can_create_topic is False
-    assert len(list((tmp_path / "topics").glob("*.md"))) == 10
-
-
-def test_a_new_topic_in_a_full_kb_is_a_failure_and_leaves_the_kb_untouched(tmp_path: Path) -> None:
-    fill_kb_with_topics(tmp_path, 9)
-    world = make_world(tmp_path)
-    world.cycle()
-    kb_before = world.kb_files()
-    world.share(message_id=42)
-
-    world.cycle()
-
-    assert world.kb_files() == kb_before
     [item] = load_state(tmp_path).pending
-    assert item.attempts == 1
-    assert "full" in (item.last_error or "")
-
-
-def test_a_full_kb_still_takes_reels_filed_under_an_existing_topic(tmp_path: Path) -> None:
-    fill_kb_with_topics(tmp_path, 9)
-    world = make_world(tmp_path)
-    world.summarizer.draft = file_under("topic-03", body="Guidance for topic-03.\n\nAllowlist it.")
-    world.share(message_id=42)
-
-    world.cycle()
-
-    assert world.inbox.reactions == [(42, "✅", None)]
-    assert len(list((tmp_path / "topics").glob("*.md"))) == 9
-
-
-def test_a_reel_that_fits_no_topic_goes_to_the_unsorted_topic_which_is_created_on_first_use(tmp_path: Path) -> None:
-    world = make_world(tmp_path)
-    world.summarizer.draft = file_under("unsorted", body="- Allowlist read-only commands.")
-    world.share(message_id=42)
-
-    world.cycle()
-
-    assert world.inbox.reactions == [(42, "✅", None)]
-    frontmatter, body = read_markdown(tmp_path / "topics" / "unsorted.md")
-    assert frontmatter["title"] == "Unsorted"
-    assert frontmatter["entries"] == [SHORTCODE]
-    assert "Allowlist read-only commands" in body
-    assert "[Unsorted](topics/unsorted.md)" in (tmp_path / "index.md").read_text()
-
-
-def test_the_summarizer_cannot_create_a_topic_of_its_own_called_unsorted(tmp_path: Path) -> None:
-    world = make_world(tmp_path)
-    world.summarizer.draft = replace(
-        DRAFT, topic=replace(DRAFT.topic, target=NewTopic(slug="unsorted", title="Misc", problem="Anything"))
-    )
-    world.share(message_id=42)
-
-    world.cycle()
-
-    assert world.kb_files() == {}
-    [item] = load_state(tmp_path).pending
-    assert item.attempts == 1
+    assert item.attempts == 0
+    assert world.summarizer.requests == []

@@ -1,27 +1,30 @@
 import json
-from dataclasses import replace
 from typing import Any
 
 import httpx
 import pytest
 
 from instaautomation.deepseek import DeepSeekSummarizer, SummaryError
-from instaautomation.ports import EntryDraft, ExistingTopic, NewTopic, SummaryRequest, TopicDecision
+from instaautomation.ports import EntryDraft, SummaryRequest
 
 REQUEST = SummaryRequest(
     transcript="Stop clicking approve on every command. Open your settings file and add the allowlist.",
     caption="Claude Code tip #12 🔥",
     on_screen_text="Stop clicking approve\nclaude --permission-mode plan",
     creator="aitipsdaily",
-    index="# Index\n\n- [Permission prompts](topics/permission-prompts.md): Too many prompts → allowlist (1 reel, updated 2026-10-01)\n",
-    topics={"permission-prompts": "Add commands you trust to `permissions.allow` in settings.json."},
-    can_create_topic=True,
+    categories={
+        "coding-agents": "Claude Code, Cursor and other coding agents",
+        "prompting": "Writing better prompts",
+        "other": "Anything that fits no other category",
+    },
 )
 
 
 def reply_content(**overrides: Any) -> dict[str, Any]:
     content: dict[str, Any] = {
         "summary": "Skip repeated permission prompts with an allowlist.",
+        "problem": "Claude Code asks permission for every command",
+        "approach": "allowlist trusted commands in settings",
         "technique": "Allowlist trusted commands in settings.",
         "steps": ["Open ~/.claude/settings.json", "Run `claude --permission-mode plan`"],
         "prerequisites": ["Claude Code installed"],
@@ -29,12 +32,7 @@ def reply_content(**overrides: Any) -> dict[str, Any]:
         "caveats": ["Don't allowlist destructive commands."],
         "tools": ["Claude Code"],
         "tags": ["permissions"],
-        "topic": {
-            "kind": "existing",
-            "slug": "permission-prompts",
-            "approach": "allowlist trusted commands or use plan mode",
-            "body": "Add commands you trust to `permissions.allow`.\n\nOr start in plan mode.",
-        },
+        "category": "coding-agents",
     }
     content.update(overrides)
     return content
@@ -65,11 +63,13 @@ def summarizer_for(deepseek: FakeDeepSeek) -> DeepSeekSummarizer:
     return DeepSeekSummarizer(api_key="sk-secret", client=httpx.Client(transport=httpx.MockTransport(deepseek.handle)))
 
 
-def test_a_reply_routed_to_an_existing_topic_becomes_an_entry_draft() -> None:
+def test_a_reply_becomes_an_entry_draft() -> None:
     draft = summarizer_for(FakeDeepSeek()).summarize(REQUEST)
 
     assert draft == EntryDraft(
         summary="Skip repeated permission prompts with an allowlist.",
+        problem="Claude Code asks permission for every command",
+        approach="allowlist trusted commands in settings",
         technique="Allowlist trusted commands in settings.",
         steps=["Open ~/.claude/settings.json", "Run `claude --permission-mode plan`"],
         prerequisites=["Claude Code installed"],
@@ -77,34 +77,11 @@ def test_a_reply_routed_to_an_existing_topic_becomes_an_entry_draft() -> None:
         caveats=["Don't allowlist destructive commands."],
         tools=["Claude Code"],
         tags=["permissions"],
-        topic=TopicDecision(
-            target=ExistingTopic(slug="permission-prompts"),
-            approach="allowlist trusted commands or use plan mode",
-            body="Add commands you trust to `permissions.allow`.\n\nOr start in plan mode.",
-        ),
+        category="coding-agents",
     )
 
 
-def test_a_reply_creating_a_new_topic_carries_its_title_and_problem() -> None:
-    new_topic = {
-        "kind": "new",
-        "slug": "plan-mode",
-        "title": "Plan before editing",
-        "problem": "Claude edits files before agreeing on a plan",
-        "approach": "start in plan mode",
-        "body": "Run `claude --permission-mode plan`.",
-    }
-
-    draft = summarizer_for(FakeDeepSeek(reply_content(topic=new_topic))).summarize(REQUEST)
-
-    assert draft.topic == TopicDecision(
-        target=NewTopic(slug="plan-mode", title="Plan before editing", problem="Claude edits files before agreeing on a plan"),
-        approach="start in plan mode",
-        body="Run `claude --permission-mode plan`.",
-    )
-
-
-def test_asks_deepseek_for_json_given_the_reel_the_index_and_every_topic_body() -> None:
+def test_asks_deepseek_for_json_given_the_reel_and_the_categories() -> None:
     deepseek = FakeDeepSeek()
 
     summarizer_for(deepseek).summarize(REQUEST)
@@ -121,8 +98,9 @@ def test_asks_deepseek_for_json_given_the_reel_the_index_and_every_topic_body() 
         REQUEST.caption,
         "claude --permission-mode plan",
         REQUEST.creator,
-        "[Permission prompts](topics/permission-prompts.md)",
-        REQUEST.topics["permission-prompts"],
+        "coding-agents",
+        "Claude Code, Cursor and other coding agents",
+        "prompting",
     ]:
         assert given in prompt
 
@@ -138,9 +116,6 @@ def without(content: dict[str, Any], key: str) -> dict[str, Any]:
     return {name: value for name, value in content.items() if name != key}
 
 
-EXISTING = reply_content()["topic"]
-
-
 @pytest.mark.parametrize(
     ("content", "finish_reason"),
     [
@@ -153,10 +128,8 @@ EXISTING = reply_content()["topic"]
         pytest.param(reply_content(steps="Open settings"), "stop", id="steps not a list"),
         pytest.param(reply_content(tags=["ok", 3]), "stop", id="non-text tag"),
         pytest.param(reply_content(summary=None), "stop", id="summary not text"),
-        pytest.param(reply_content(topic="permission-prompts"), "stop", id="topic not an object"),
-        pytest.param(reply_content(topic=without(EXISTING, "body")), "stop", id="topic without body"),
-        pytest.param(reply_content(topic=EXISTING | {"kind": "merge"}), "stop", id="unknown topic kind"),
-        pytest.param(reply_content(topic=EXISTING | {"kind": "new", "problem": "x"}), "stop", id="new topic without title"),
+        pytest.param(without(reply_content(), "category"), "stop", id="no category"),
+        pytest.param(reply_content(problem=["Too many prompts"]), "stop", id="problem not text"),
     ],
 )
 def test_an_unusable_reply_is_a_summary_failure(content: object, finish_reason: str) -> None:
@@ -172,18 +145,3 @@ def test_a_null_content_is_a_summary_failure() -> None:
 
     with pytest.raises(SummaryError):
         summarizer_for(NullContent()).summarize(REQUEST)
-
-
-def prompt_for(request: SummaryRequest) -> str:
-    deepseek = FakeDeepSeek()
-    summarizer_for(deepseek).summarize(request)
-    return "\n".join(message["content"] for message in deepseek.sent()["messages"])
-
-
-def test_the_unsorted_topic_is_always_offered_and_a_full_kb_rules_out_new_topics() -> None:
-    open_kb = prompt_for(REQUEST)
-    full_kb = prompt_for(replace(REQUEST, can_create_topic=False))
-
-    assert '"unsorted"' in open_kb and '"unsorted"' in full_kb
-    assert "full" not in open_kb.lower()
-    assert "knowledge base is full" in full_kb.lower()

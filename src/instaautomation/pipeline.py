@@ -4,34 +4,16 @@ import logging
 import re
 from pathlib import Path
 
-from instaautomation.entry import render_entry
+from instaautomation.categories import load_categories
+from instaautomation.entry import load_entries, render_entry
 from instaautomation.navigation import render_claude_block, render_index
-from instaautomation.ports import (
-    MAX_TOPICS,
-    UNSORTED_TOPIC,
-    EntryDraft,
-    ExistingTopic,
-    Inbox,
-    MessageRef,
-    NewTopic,
-    Ports,
-    SummaryRequest,
-    TopicDecision,
-)
+from instaautomation.ports import EntryDraft, Inbox, MessageRef, Ports, SummaryRequest
 from instaautomation.state import QueueItem, State, load_state, save_state
-from instaautomation.topics import Topic, load_topics, write_topic
 
 REEL_LINK = re.compile(r"https?://(?:www\.)?instagram\.com/(reels?|p)/([A-Za-z0-9_-]+)")
 ADDED = "✅"
 FAILED = "❌"
 MAX_ATTEMPTS = 3
-TOPIC_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-# The language tag after the opening fence isn't code.
-FENCED_CODE = re.compile(r"^ *(`{3,}|~{3,})[^\n]*\n(.*?)^ *\1[`~]*[ \t]*$", re.DOTALL | re.MULTILINE)
-# Kept to one line, so a stray backtick (an apostrophe typed as `) can't pair with code paragraphs away.
-INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)")
-# A merged topic body shorter than this share of the old one has lost guidance.
-MIN_MERGED_LENGTH_RATIO = 0.7
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +25,11 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
     save_state(kb_dir, state)
     for ref in already_added:
         _react(ports.inbox, ref, ADDED)
+    # Read once, before any paid call: a mistake in the owner's file fails the run without costing reels attempts.
+    categories = load_categories(kb_dir)
     for item in list(state.pending):
         try:
-            _process(ports, kb_dir, item)
+            _process(ports, kb_dir, item, categories)
         except Exception as error:
             item.attempts += 1
             item.last_error = _one_line(error)
@@ -65,12 +49,13 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
 
 
 def _regenerate_navigation(kb_dir: Path) -> None:
-    """Rebuilt from the topic files every cycle, so hand edits such as pinning show up without a new reel."""
-    topics = load_topics(kb_dir).values()
-    if not topics:
+    """Rebuilt from the entry files every cycle, so hand edits such as pinning show up without a new reel."""
+    entries = load_entries(kb_dir)
+    if not entries:
         return
-    _write_if_changed(kb_dir / "index.md", render_index(topics))
-    _write_if_changed(kb_dir / "claude-block.md", render_claude_block(topics))
+    categories = load_categories(kb_dir)
+    _write_if_changed(kb_dir / "index.md", render_index(entries, categories))
+    _write_if_changed(kb_dir / "claude-block.md", render_claude_block(entries, categories))
 
 
 def _write_if_changed(path: Path, text: str) -> None:
@@ -112,9 +97,7 @@ def _react(inbox: Inbox, ref: MessageRef, emoji: str, reason: str | None = None)
         log.warning("could not react %s to message %s", emoji, ref.message_id, exc_info=True)
 
 
-def _process(ports: Ports, kb_dir: Path, item: QueueItem) -> None:
-    # Read before any paid call, so an unreadable topic file costs nothing.
-    topics = load_topics(kb_dir)
+def _process(ports: Ports, kb_dir: Path, item: QueueItem, categories: dict[str, str]) -> None:
     reel = ports.reel_source.fetch(item.url)
     transcript = ports.transcriber.transcribe(reel.video_path)
     on_screen_text = ports.screen_reader.read(reel.video_path)
@@ -124,126 +107,37 @@ def _process(ports: Ports, kb_dir: Path, item: QueueItem) -> None:
             caption=reel.caption,
             on_screen_text=on_screen_text,
             creator=reel.creator,
-            index=render_index(topics.values()),
-            topics={slug: topic.body for slug, topic in topics.items()},
-            can_create_topic=_can_create_topic(topics),
+            categories=categories,
         )
     )
-    _check_draft(draft, topics, reel.shortcode)
+    _check_draft(draft, categories)
     date_added = ports.clock.now().date().isoformat()
     entry_path = kb_dir / "entries" / f"{reel.shortcode}.md"
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_text(render_entry(reel, draft, date_added, transcript, on_screen_text))
-    write_topic(kb_dir, _routed_topic(draft.topic, topics, reel.shortcode, date_added))
-
-
-def _routed_topic(decision: TopicDecision, topics: dict[str, Topic], shortcode: str, date: str) -> Topic:
-    target = decision.target
-    if isinstance(target, NewTopic):
-        # Only already on disk when retrying after a crash that followed this reel's own topic write.
-        previous = topics.get(target.slug)
-        topic = Topic(
-            slug=target.slug,
-            title=target.title,
-            problem=target.problem,
-            approach=decision.approach,
-            pinned=previous.pinned if previous else False,
-            entries=previous.entries if previous else [],
-            updated=date,
-            body=decision.body,
-        )
-    elif target.slug not in topics:
-        # Only the unsorted topic may be filed under before it exists (see _check_decision).
-        topic = Topic(
-            slug=UNSORTED_TOPIC,
-            title="Unsorted",
-            problem="Reels that fit no other topic",
-            approach=decision.approach,
-            pinned=False,
-            entries=[],
-            updated=date,
-            body=decision.body,
-        )
-    else:
-        # Title, problem and the user's pinned flag stay as they are on disk.
-        topic = topics[target.slug]
-        topic.approach = decision.approach
-        topic.body = decision.body
-        topic.updated = date
-    if shortcode not in topic.entries:
-        topic.entries.append(shortcode)
-    return topic
 
 
 class MalformedSummary(ValueError):
     """The summarizer returned something that can't safely become a knowledge-base entry."""
 
 
-def _check_draft(draft: EntryDraft, topics: dict[str, Topic], shortcode: str) -> None:
+def _check_draft(draft: EntryDraft, categories: dict[str, str]) -> None:
     for name in ("summary", "technique", "when_useful"):
         if not _is_text(getattr(draft, name)):
             raise MalformedSummary(f"{name} must be non-empty text")
+    # The index and Claude block show these one line per entry.
+    for name in ("problem", "approach"):
+        value = getattr(draft, name)
+        if not _is_text(value) or "\n" in value.strip():
+            raise MalformedSummary(f"{name} must be a single line of text")
     for name in ("steps", "prerequisites", "caveats", "tools", "tags"):
         value = getattr(draft, name)
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise MalformedSummary(f"{name} must be a list of text")
     if not draft.steps:
         raise MalformedSummary("steps must not be empty")
-    _check_decision(draft.topic, topics, shortcode)
-
-
-def _check_decision(decision: TopicDecision, topics: dict[str, Topic], shortcode: str) -> None:
-    target = decision.target
-    if not TOPIC_SLUG.fullmatch(target.slug):
-        raise MalformedSummary(f"topic is not a slug: {target.slug!r}")
-    # The index and Claude block show these one line per topic.
-    one_liners = {"approach": decision.approach}
-    if isinstance(target, NewTopic):
-        one_liners |= {"title": target.title, "problem": target.problem}
-    for name, value in one_liners.items():
-        if not _is_text(value) or "\n" in value.strip():
-            raise MalformedSummary(f"topic {name} must be a single line of text")
-    if not _is_text(decision.body):
-        raise MalformedSummary("topic body must be non-empty text")
-    if isinstance(target, ExistingTopic):
-        if target.slug in topics:
-            _check_merge_keeps_guidance(topics[target.slug].body, decision.body)
-        elif target.slug != UNSORTED_TOPIC:
-            raise MalformedSummary(f"existing topic does not exist: {target.slug}")
-    elif target.slug == UNSORTED_TOPIC:
-        raise MalformedSummary(f"{UNSORTED_TOPIC} is reserved for reels that fit no topic")
-    elif target.slug in topics:
-        if shortcode not in topics[target.slug].entries:
-            raise MalformedSummary(f"new topic already exists: {target.slug}")
-    elif not _can_create_topic(topics):
-        raise MalformedSummary(f"knowledge base is full ({MAX_TOPICS} topics); file the reel under an existing topic")
-
-
-def _can_create_topic(topics: dict[str, Topic]) -> bool:
-    """One of the slots is kept for the unsorted topic, whether or not it exists yet."""
-    return len(topics.keys() - {UNSORTED_TOPIC}) < MAX_TOPICS - 1
-
-
-def _check_merge_keeps_guidance(old: str, new: str) -> None:
-    """A merge replaces the topic body wholesale, so catch rewrites that drop earlier reels' guidance.
-
-    Commands and config are the most valuable part and survive any rewording, so each must still be there;
-    a body much shorter than before has lost prose. Small prose losses still get through.
-    """
-    missing = [snippet for snippet in _code_snippets(old) if snippet not in new]
-    if missing:
-        raise MalformedSummary(f"topic merge dropped code from {len(missing)} place(s), e.g. {missing[0][:60]!r}")
-    if len(new.strip()) < MIN_MERGED_LENGTH_RATIO * len(old.strip()):
-        raise MalformedSummary(f"topic merge shrank the topic from {len(old.strip())} to {len(new.strip())} characters")
-
-
-def _code_snippets(markdown: str) -> list[str]:
-    """Inline code spans and the lines of fenced code blocks."""
-    blocks = [match.group(2) for match in FENCED_CODE.finditer(markdown)]
-    lines = [line.strip() for block in blocks for line in block.splitlines() if line.strip()]
-    prose = FENCED_CODE.sub("", markdown)
-    spans = [match.group(2).strip() for match in INLINE_CODE.finditer(prose) if match.group(2).strip()]
-    return lines + spans
+    if draft.category not in categories:
+        raise MalformedSummary(f"not one of the categories: {str(draft.category)[:60]!r}")
 
 
 def _is_text(value: object) -> bool:

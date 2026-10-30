@@ -34,49 +34,23 @@ class Reel:
     video_path: Path
 
 
-MAX_TOPICS = 10
-"""The knowledge base never grows past this many topics, the unsorted one included."""
-UNSORTED_TOPIC = "unsorted"
-"""The catch-all topic for reels that fit no other; created by the core the first time a reel is filed there."""
-
-
 @dataclass(frozen=True)
 class SummaryRequest:
     transcript: str
     caption: str
     on_screen_text: str
     creator: str
-    index: str
-    topics: dict[str, str]
-    """Current guidance body of every topic, by slug, so an existing topic can be merged into."""
-    can_create_topic: bool
-    """False once the knowledge base is full: the reel must go under an existing topic or the unsorted one."""
-
-
-@dataclass(frozen=True)
-class ExistingTopic:
-    slug: str
-
-
-@dataclass(frozen=True)
-class NewTopic:
-    slug: str
-    title: str
-    problem: str
-
-
-@dataclass(frozen=True)
-class TopicDecision:
-    """Where a reel belongs, plus the topic's guidance rewritten to include it."""
-
-    target: ExistingTopic | NewTopic
-    approach: str
-    body: str
+    categories: dict[str, str]
+    """Every category an entry may be filed under, slug to description, `other` last."""
 
 
 @dataclass(frozen=True)
 class EntryDraft:
     summary: str
+    problem: str
+    """One line: the problem the reel solves."""
+    approach: str
+    """One line: how the reel solves it."""
     technique: str
     steps: list[str]
     prerequisites: list[str]
@@ -84,7 +58,7 @@ class EntryDraft:
     caveats: list[str]
     tools: list[str]
     tags: list[str]
-    topic: TopicDecision
+    category: str
 
 
 class Inbox(Protocol):
