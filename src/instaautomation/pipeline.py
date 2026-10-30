@@ -6,7 +6,18 @@ from pathlib import Path
 
 from instaautomation.entry import render_entry
 from instaautomation.navigation import render_claude_block, render_index
-from instaautomation.ports import EntryDraft, ExistingTopic, Inbox, MessageRef, NewTopic, Ports, SummaryRequest, TopicDecision
+from instaautomation.ports import (
+    MAX_TOPICS,
+    UNSORTED_TOPIC,
+    EntryDraft,
+    ExistingTopic,
+    Inbox,
+    MessageRef,
+    NewTopic,
+    Ports,
+    SummaryRequest,
+    TopicDecision,
+)
 from instaautomation.state import QueueItem, State, load_state, save_state
 from instaautomation.topics import Topic, load_topics, write_topic
 
@@ -115,6 +126,7 @@ def _process(ports: Ports, kb_dir: Path, item: QueueItem) -> None:
             creator=reel.creator,
             index=render_index(topics.values()),
             topics={slug: topic.body for slug, topic in topics.items()},
+            can_create_topic=_can_create_topic(topics),
         )
     )
     _check_draft(draft, topics, reel.shortcode)
@@ -137,6 +149,18 @@ def _routed_topic(decision: TopicDecision, topics: dict[str, Topic], shortcode: 
             approach=decision.approach,
             pinned=previous.pinned if previous else False,
             entries=previous.entries if previous else [],
+            updated=date,
+            body=decision.body,
+        )
+    elif target.slug not in topics:
+        # Only the unsorted topic may be filed under before it exists (see _check_decision).
+        topic = Topic(
+            slug=UNSORTED_TOPIC,
+            title="Unsorted",
+            problem="Reels that fit no other topic",
+            approach=decision.approach,
+            pinned=False,
+            entries=[],
             updated=date,
             body=decision.body,
         )
@@ -182,11 +206,22 @@ def _check_decision(decision: TopicDecision, topics: dict[str, Topic], shortcode
     if not _is_text(decision.body):
         raise MalformedSummary("topic body must be non-empty text")
     if isinstance(target, ExistingTopic):
-        if target.slug not in topics:
+        if target.slug in topics:
+            _check_merge_keeps_guidance(topics[target.slug].body, decision.body)
+        elif target.slug != UNSORTED_TOPIC:
             raise MalformedSummary(f"existing topic does not exist: {target.slug}")
-        _check_merge_keeps_guidance(topics[target.slug].body, decision.body)
-    if isinstance(target, NewTopic) and target.slug in topics and shortcode not in topics[target.slug].entries:
-        raise MalformedSummary(f"new topic already exists: {target.slug}")
+    elif target.slug == UNSORTED_TOPIC:
+        raise MalformedSummary(f"{UNSORTED_TOPIC} is reserved for reels that fit no topic")
+    elif target.slug in topics:
+        if shortcode not in topics[target.slug].entries:
+            raise MalformedSummary(f"new topic already exists: {target.slug}")
+    elif not _can_create_topic(topics):
+        raise MalformedSummary(f"knowledge base is full ({MAX_TOPICS} topics); file the reel under an existing topic")
+
+
+def _can_create_topic(topics: dict[str, Topic]) -> bool:
+    """One of the slots is kept for the unsorted topic, whether or not it exists yet."""
+    return len(topics.keys() - {UNSORTED_TOPIC}) < MAX_TOPICS - 1
 
 
 def _check_merge_keeps_guidance(old: str, new: str) -> None:

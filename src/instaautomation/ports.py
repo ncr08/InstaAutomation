@@ -34,6 +34,12 @@ class Reel:
     video_path: Path
 
 
+MAX_TOPICS = 10
+"""The knowledge base never grows past this many topics, the unsorted one included."""
+UNSORTED_TOPIC = "unsorted"
+"""The catch-all topic for reels that fit no other; created by the core the first time a reel is filed there."""
+
+
 @dataclass(frozen=True)
 class SummaryRequest:
     transcript: str
@@ -43,6 +49,8 @@ class SummaryRequest:
     index: str
     topics: dict[str, str]
     """Current guidance body of every topic, by slug, so an existing topic can be merged into."""
+    can_create_topic: bool
+    """False once the knowledge base is full: the reel must go under an existing topic or the unsorted one."""
 
 
 @dataclass(frozen=True)

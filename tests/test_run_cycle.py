@@ -684,3 +684,83 @@ def test_hand_edited_topic_files_are_read_leniently(tmp_path: Path) -> None:
     block = (tmp_path / "claude-block.md").read_text()
     assert block.index("Problem of pinned-one") < block.index("Odd YAML")
     assert "(0 reels, updated 2026-10-01)" in (tmp_path / "index.md").read_text()
+
+
+def fill_kb_with_topics(kb_dir: Path, count: int) -> None:
+    for n in range(count):
+        write_topic_file(kb_dir, f"topic-{n:02d}", reels=1, updated="2026-10-01")
+
+
+def file_under(slug: str, body: str = "Guidance.") -> EntryDraft:
+    return replace(DRAFT, topic=TopicDecision(target=ExistingTopic(slug=slug), approach="Allowlist", body=body))
+
+
+def test_new_topics_may_be_created_until_there_are_nine_besides_unsorted(tmp_path: Path) -> None:
+    fill_kb_with_topics(tmp_path, 8)
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    world.cycle()
+    assert world.summarizer.requests[-1].can_create_topic is True
+
+    world.summarizer.draft = file_under("unsorted")
+    world.share(message_id=43, text=OTHER_LINK)
+    world.cycle()
+
+    assert world.summarizer.requests[-1].can_create_topic is False
+    assert len(list((tmp_path / "topics").glob("*.md"))) == 10
+
+
+def test_a_new_topic_in_a_full_kb_is_a_failure_and_leaves_the_kb_untouched(tmp_path: Path) -> None:
+    fill_kb_with_topics(tmp_path, 9)
+    world = make_world(tmp_path)
+    world.cycle()
+    kb_before = world.kb_files()
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.kb_files() == kb_before
+    [item] = load_state(tmp_path).pending
+    assert item.attempts == 1
+    assert "full" in (item.last_error or "")
+
+
+def test_a_full_kb_still_takes_reels_filed_under_an_existing_topic(tmp_path: Path) -> None:
+    fill_kb_with_topics(tmp_path, 9)
+    world = make_world(tmp_path)
+    world.summarizer.draft = file_under("topic-03", body="Guidance for topic-03.\n\nAllowlist it.")
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+    assert len(list((tmp_path / "topics").glob("*.md"))) == 9
+
+
+def test_a_reel_that_fits_no_topic_goes_to_the_unsorted_topic_which_is_created_on_first_use(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.summarizer.draft = file_under("unsorted", body="- Allowlist read-only commands.")
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+    frontmatter, body = read_markdown(tmp_path / "topics" / "unsorted.md")
+    assert frontmatter["title"] == "Unsorted"
+    assert frontmatter["entries"] == [SHORTCODE]
+    assert "Allowlist read-only commands" in body
+    assert "[Unsorted](topics/unsorted.md)" in (tmp_path / "index.md").read_text()
+
+
+def test_the_summarizer_cannot_create_a_topic_of_its_own_called_unsorted(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.summarizer.draft = replace(
+        DRAFT, topic=replace(DRAFT.topic, target=NewTopic(slug="unsorted", title="Misc", problem="Anything"))
+    )
+    world.share(message_id=42)
+
+    world.cycle()
+
+    assert world.kb_files() == {}
+    [item] = load_state(tmp_path).pending
+    assert item.attempts == 1

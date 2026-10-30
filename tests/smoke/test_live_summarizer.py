@@ -89,3 +89,54 @@ def test_deepseek_summarizes_real_text_into_entries_and_topics_the_core_accepts(
     [new_topic] = [topic for slug, topic in topics.items() if slug != "permission-prompts"]
     assert new_topic.entries == ["DSmokeSilent"]
     assert "/init" in (tmp_path / "entries" / "DSmokeSilent.md").read_text()
+
+
+FULL_KB_PROBLEMS = [
+    "Image prompts come out generic",
+    "API bills are unpredictable",
+    "Local models run too slowly",
+    "Meeting notes take too long to write",
+    "Spreadsheets need manual cleanup",
+    "Slide decks take hours to build",
+    "Emails pile up unanswered",
+    "Voice cloning sounds robotic",
+    "Translations lose the tone",
+]
+
+
+def test_in_a_full_kb_a_reel_on_a_new_problem_goes_to_unsorted(tmp_path: Path) -> None:
+    for n, problem in enumerate(FULL_KB_PROBLEMS):
+        write_topic(
+            tmp_path,
+            Topic(
+                slug=f"topic-{n}",
+                title=problem,
+                problem=problem,
+                approach="see the topic",
+                pinned=False,
+                entries=[f"DOld{n}"],
+                updated="2026-10-01",
+                body=f"Guidance about: {problem.lower()}.",
+            ),
+        )
+    shortcode, transcript, on_screen_text, caption = REELS[1]
+    video = Path(f"/videos/{shortcode}.mp4")
+    inbox = FakeInbox(
+        [Message(update_id=1, message_id=1, chat_id=OWNER_ID, sender_id=OWNER_ID, text=f"https://www.instagram.com/reel/{shortcode}/")]
+    )
+    ports = Ports(
+        inbox=inbox,
+        reel_source=FakeReelSource(
+            [Reel(url=f"https://www.instagram.com/reel/{shortcode}/", shortcode=shortcode, creator="aitipsdaily", caption=caption, video_path=video)]
+        ),
+        transcriber=FakeTranscriber({video: transcript}),
+        screen_reader=FakeScreenReader({video: on_screen_text}),
+        summarizer=DeepSeekSummarizer.from_env(),
+        clock=FixedClock(datetime(2026, 10, 30, tzinfo=timezone.utc)),
+    )
+
+    run_cycle(ports, tmp_path, owner_id=OWNER_ID)
+
+    print((tmp_path / "topics" / "unsorted.md").read_text())
+    assert inbox.reactions == [(1, "✅", None)]
+    assert load_topics(tmp_path)["unsorted"].entries == [shortcode]

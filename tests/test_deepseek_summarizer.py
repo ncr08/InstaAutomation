@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ REQUEST = SummaryRequest(
     creator="aitipsdaily",
     index="# Index\n\n- [Permission prompts](topics/permission-prompts.md): Too many prompts → allowlist (1 reel, updated 2026-10-01)\n",
     topics={"permission-prompts": "Add commands you trust to `permissions.allow` in settings.json."},
+    can_create_topic=True,
 )
 
 
@@ -170,3 +172,18 @@ def test_a_null_content_is_a_summary_failure() -> None:
 
     with pytest.raises(SummaryError):
         summarizer_for(NullContent()).summarize(REQUEST)
+
+
+def prompt_for(request: SummaryRequest) -> str:
+    deepseek = FakeDeepSeek()
+    summarizer_for(deepseek).summarize(request)
+    return "\n".join(message["content"] for message in deepseek.sent()["messages"])
+
+
+def test_the_unsorted_topic_is_always_offered_and_a_full_kb_rules_out_new_topics() -> None:
+    open_kb = prompt_for(REQUEST)
+    full_kb = prompt_for(replace(REQUEST, can_create_topic=False))
+
+    assert '"unsorted"' in open_kb and '"unsorted"' in full_kb
+    assert "full" not in open_kb.lower()
+    assert "knowledge base is full" in full_kb.lower()
