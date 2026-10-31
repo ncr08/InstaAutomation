@@ -1,25 +1,41 @@
 #!/usr/bin/env python3
-"""One-time local install of the knowledge base into Claude Code. Safe to re-run.
+"""One-time local install of the knowledge base into Claude Code and macOS. Safe to re-run.
 
 - adds one import line for the Claude block to the global Claude instructions (nothing else there is touched),
 - symlinks the /ai-kb skill into the Claude skills directory,
-- adds a SessionStart hook that quietly pulls this clone, giving up fast when offline.
+- adds a SessionStart hook that quietly pulls this clone, giving up fast when offline,
+- installs a launchd job that pulls this clone and rebuilds the static site in site/ every hour,
+  at login and after the Mac wakes; the log goes to ~/Library/Logs.
 
 Uses only the standard library so the system python3 can run it: python3 scripts/install_claude.py
+python3 scripts/install_claude.py --uninstall removes the launchd job and leaves everything else alone.
 """
 
 import json
 import os
+import plistlib
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+# Overridable so the tests never touch the real launchd.
+LAUNCH_AGENTS_DIR = Path(os.environ.get("LAUNCH_AGENTS_DIR") or Path.home() / "Library" / "LaunchAgents")
+LOG_DIR = Path(os.environ.get("LAUNCH_LOG_DIR") or Path.home() / "Library" / "Logs")
+LAUNCHCTL = os.environ.get("LAUNCHCTL", "launchctl")
+SITE_JOB = "com.instaautomation.site"
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--uninstall"]:
+        uninstall_site_job()
+        return
+    if sys.argv[1:]:
+        sys.exit("Usage: python3 scripts/install_claude.py [--uninstall]")
     # Everything is read and checked before the first write, so a refusal leaves the config untouched.
     instructions = CONFIG_DIR / "CLAUDE.md"
     import_line = f"@{REPO / 'kb' / 'claude-block.md'}"
@@ -38,6 +54,9 @@ def main() -> None:
     command = _pull_command()
     # Matched on the exact command, so after moving the clone the old hook stays: remove it by hand.
     hook_installed = any(hook.get("command") == command for group in session_start for hook in group["hooks"])
+    uv = shutil.which("uv")
+    if uv is None:
+        _refuse("uv is not on PATH, and the site job runs the export with it; install uv and re-run")
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if import_line not in existing_instructions.splitlines():
@@ -50,7 +69,64 @@ def main() -> None:
         # The hook's own timeout bounds the pull, as macOS has no timeout(1).
         session_start.append({"matcher": "startup", "hooks": [{"type": "command", "command": command, "timeout": 15}]})
         _write_atomically(settings_file, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
-    print(f"Installed: {import_line} in {instructions}, {skill_link} -> {skill_target}, SessionStart pull hook.")
+    plist = install_site_job(uv)
+    print(f"Installed: {import_line} in {instructions}, {skill_link} -> {skill_target}, SessionStart pull hook, {plist}.")
+    print(f"Bookmark {(REPO / 'site' / 'index.html').as_uri()}")
+
+
+def install_site_job(uv: str) -> Path:
+    """Writes the launchd job and (re)loads it when it changed or isn't loaded; otherwise leaves it be."""
+    plist = LAUNCH_AGENTS_DIR / f"{SITE_JOB}.plist"
+    log = LOG_DIR / "instaautomation-site.log"
+    job = {
+        "Label": SITE_JOB,
+        "ProgramArguments": [uv, "run", "--project", str(REPO), "python", "-m", "instaautomation", "export"],
+        "WorkingDirectory": str(REPO),
+        # launchd's own PATH lacks Homebrew, where git and gh usually live.
+        "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        "RunAtLoad": True,
+        # On the hour; an hour slept through is caught up once on wake, which StartInterval wouldn't do.
+        "StartCalendarInterval": {"Minute": 0},
+        "ProcessType": "Background",
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+    }
+    content = plistlib.dumps(job)
+    changed = not plist.exists() or plist.read_bytes() != content
+    if changed:
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomically(plist, content)
+    if changed or not _loaded():
+        _launchctl("bootout", _target(), check=False)
+        _launchctl("bootstrap", _domain(), str(plist))
+    return plist
+
+
+def uninstall_site_job() -> None:
+    plist = LAUNCH_AGENTS_DIR / f"{SITE_JOB}.plist"
+    _launchctl("bootout", _target(), check=False)
+    plist.unlink(missing_ok=True)
+    print(f"Removed the site job ({plist}). The rest of the install is unchanged.")
+
+
+def _domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _target() -> str:
+    return f"{_domain()}/{SITE_JOB}"
+
+
+def _loaded() -> bool:
+    return _launchctl("print", _target(), check=False).returncode == 0
+
+
+def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run([LAUNCHCTL, *args], capture_output=True, text=True, check=False)
+    if check and result.returncode != 0:
+        sys.exit(f"launchctl {args[0]} failed: {result.stderr.strip() or result.returncode}")
+    return result
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -74,10 +150,13 @@ def _read_settings(path: Path) -> dict[str, Any]:
     return settings
 
 
-def _write_atomically(path: Path, text: str) -> None:
+def _write_atomically(path: Path, content: str | bytes) -> None:
     # A crash mid-write must never leave the owner's settings truncated.
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text)
+    if isinstance(content, bytes):
+        temporary.write_bytes(content)
+    else:
+        temporary.write_text(content)
     os.replace(temporary, path)
 
 

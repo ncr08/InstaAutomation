@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -10,13 +11,52 @@ ROOT = Path(__file__).resolve().parent.parent
 IMPORT_LINE = f"@{ROOT}/kb/claude-block.md"
 
 
-def install(config_dir: Path) -> subprocess.CompletedProcess[str]:
+SITE_JOB = "com.instaautomation.site"
+
+# Stands in for launchctl: records each call and remembers whether the job is loaded.
+FAKE_LAUNCHCTL = """#!/bin/sh
+d=$(dirname "$0")
+echo "$*" >> "$d/calls"
+case "$1" in
+  print) [ -f "$d/loaded" ] ;;
+  bootstrap) touch "$d/loaded" ;;
+  bootout) [ -f "$d/loaded" ] && rm "$d/loaded" || exit 3 ;;
+esac
+"""
+
+
+def install(config_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    launchd = config_dir / "launchd"
+    launchd.mkdir(exist_ok=True)
+    launchctl = launchd / "launchctl"
+    if not launchctl.exists():
+        launchctl.write_text(FAKE_LAUNCHCTL)
+        launchctl.chmod(0o755)
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "install_claude.py")],
-        env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
+        [sys.executable, str(ROOT / "scripts" / "install_claude.py"), *args],
+        env={
+            **os.environ,
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+            "LAUNCH_AGENTS_DIR": str(launchd / "LaunchAgents"),
+            "LAUNCH_LOG_DIR": str(launchd / "Logs"),
+            "LAUNCHCTL": str(launchctl),
+        },
         capture_output=True,
         text=True,
     )
+
+
+def site_job_plist(config_dir: Path) -> Path:
+    return config_dir / "launchd" / "LaunchAgents" / f"{SITE_JOB}.plist"
+
+
+def launchctl_calls(config_dir: Path) -> list[str]:
+    calls = config_dir / "launchd" / "calls"
+    return [line.split()[0] for line in calls.read_text().splitlines()] if calls.exists() else []
+
+
+def job_loaded(config_dir: Path) -> bool:
+    return (config_dir / "launchd" / "loaded").exists()
 
 
 def session_start_commands(config_dir: Path) -> list[str]:
@@ -80,3 +120,62 @@ def test_an_existing_skill_that_is_not_ours_is_left_alone(tmp_path: Path) -> Non
     assert "ai-kb" in result.stderr
     assert (tmp_path / "skills" / "ai-kb").is_dir() and not (tmp_path / "skills" / "ai-kb").is_symlink()
     assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_the_site_job_rebuilds_the_site_from_this_clone_hourly_and_at_login(tmp_path: Path) -> None:
+    result = install(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    job = plistlib.loads(site_job_plist(tmp_path).read_bytes())
+    assert job["Label"] == SITE_JOB
+    assert job["ProgramArguments"][1:] == ["run", "--project", str(ROOT), "python", "-m", "instaautomation", "export"]
+    assert Path(job["ProgramArguments"][0]).name == "uv"
+    assert job["WorkingDirectory"] == str(ROOT)
+    assert job["RunAtLoad"] is True
+    assert job["StartCalendarInterval"] == {"Minute": 0}
+    assert job["StandardOutPath"] == job["StandardErrorPath"] == str(tmp_path / "launchd" / "Logs" / "instaautomation-site.log")
+    assert "/" in job["EnvironmentVariables"]["PATH"]
+    assert job_loaded(tmp_path)
+    assert (ROOT / "site" / "index.html").as_uri() in result.stdout
+
+
+def test_rerunning_the_installer_leaves_a_loaded_site_job_alone(tmp_path: Path) -> None:
+    install(tmp_path)
+    plist = site_job_plist(tmp_path).read_bytes()
+    calls_after_first = launchctl_calls(tmp_path)
+
+    assert install(tmp_path).returncode == 0
+
+    assert site_job_plist(tmp_path).read_bytes() == plist
+    assert launchctl_calls(tmp_path)[len(calls_after_first):] == ["print"]
+
+
+def test_rerunning_the_installer_reloads_a_site_job_that_was_unloaded(tmp_path: Path) -> None:
+    install(tmp_path)
+    (tmp_path / "launchd" / "loaded").unlink()
+
+    assert install(tmp_path).returncode == 0
+
+    assert job_loaded(tmp_path)
+
+
+def test_uninstall_removes_only_the_site_job(tmp_path: Path) -> None:
+    install(tmp_path)
+    before = {name: (tmp_path / name).read_text() for name in ("CLAUDE.md", "settings.json")}
+
+    result = install(tmp_path, "--uninstall")
+
+    assert result.returncode == 0, result.stderr
+    assert not site_job_plist(tmp_path).exists()
+    assert not job_loaded(tmp_path)
+    assert {name: (tmp_path / name).read_text() for name in before} == before
+    assert (tmp_path / "skills" / "ai-kb").is_symlink()
+
+
+def test_a_refused_install_does_not_touch_the_site_job(tmp_path: Path) -> None:
+    (tmp_path / "settings.json").write_text('{"model": "opus",')
+
+    assert install(tmp_path).returncode != 0
+
+    assert not site_job_plist(tmp_path).exists()
+    assert launchctl_calls(tmp_path) == []
