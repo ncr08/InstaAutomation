@@ -55,3 +55,15 @@ jobs:
           done
           echo "::error::Could not push knowledge-base changes; the next run starts from the last pushed state."
           exit 1
+      # Plain curl, not the pipeline: it must still work when the cycle crashed before the bot was set up.
+      # Every failed run sends one message; there is no state to deduplicate them.
+      - name: Tell the owner the cycle failed
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS --fail -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_OWNER_ID}" \
+            --data-urlencode "text=⚠️ The knowledge-base cycle failed. Logs: ${RUN_URL}"
