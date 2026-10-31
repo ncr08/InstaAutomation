@@ -1,4 +1,4 @@
-"""Updater and CycleRuns adapters for the frontend: git and the GitHub CLI, run in the knowledge base's clone."""
+"""The git updater and CycleRuns adapter for the site build: git and the GitHub CLI, run in the knowledge base's clone."""
 
 import json
 import os
@@ -16,6 +16,7 @@ class GitUpdater:
         self._repo_dir = repo_dir
 
     def update(self) -> str | None:
+        """Bring the knowledge base up to date without touching local changes; the reason it couldn't, or None."""
         # --ff-only never merges or rewrites anything: local edits or a diverged branch just make it refuse.
         try:
             result = subprocess.run(

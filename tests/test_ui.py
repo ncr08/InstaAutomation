@@ -1,21 +1,21 @@
-"""The frontend, called in-process as a WSGI app against a copy of the sample knowledge base."""
+"""The frontend: the static site built from a copy of the sample knowledge base, read back from disk."""
 
 import json
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
-from wsgiref.util import setup_testing_defaults
 
 import pytest
 
-from instaautomation.fakes import FakeCycleRuns, FakeUpdater
+from instaautomation.fakes import FakeCycleRuns, FixedClock
 from instaautomation.ports import CycleRun, MessageRef
 from instaautomation.state import QueueItem, State, save_state
-from instaautomation.ui import make_app
+from instaautomation.ui import build_site
 
 SAMPLE_KB = Path(__file__).resolve().parent / "fixtures" / "sample-kb"
+NOW = datetime(2026, 10, 31, 9, 30, tzinfo=timezone.utc)
 RUN = CycleRun(
     started_at=datetime(2026, 10, 30, 8, 0, tzinfo=timezone.utc),
     outcome="failure",
@@ -30,28 +30,18 @@ def kb(tmp_path: Path) -> Path:
     return kb_dir
 
 
-class Client:
-    def __init__(self, kb_dir: Path, updater: FakeUpdater | None = None, cycle_runs: FakeCycleRuns | None = None) -> None:
-        self.app = make_app(kb_dir, updater or FakeUpdater(), cycle_runs or FakeCycleRuns([RUN]))
+class Site:
+    """The site folder next to the knowledge base, as in the clone: kb/ and site/ side by side."""
 
-    def get(self, path: str) -> tuple[int, dict[str, str], bytes]:
-        environ: dict[str, object] = {"PATH_INFO": path}
-        setup_testing_defaults(environ)
-        response: dict[str, object] = {}
+    def __init__(self, kb_dir: Path, update_failure: str | None = None, cycle_runs: FakeCycleRuns | None = None, now: datetime = NOW) -> None:
+        self.dir = kb_dir.parent / "site"
+        build_site(kb_dir, self.dir, update_failure=update_failure, cycle_runs=cycle_runs or FakeCycleRuns([RUN]), clock=FixedClock(now))
 
-        def start_response(status: str, headers: list[tuple[str, str]], exc_info: object = None) -> object:
-            response["status"] = int(status.split()[0])
-            response["headers"] = dict(headers)
-            return None
+    def page(self, name: str) -> str:
+        return (self.dir / name).read_text()
 
-        body = b"".join(self.app(environ, start_response))  # type: ignore[arg-type]
-        return response["status"], response["headers"], body  # type: ignore[return-value]
-
-    def page(self, path: str) -> str:
-        status, headers, body = self.get(path)
-        assert status == 200, f"{path} gave {status}"
-        assert headers["Content-Type"].startswith("text/html")
-        return body.decode()
+    def pages(self) -> list[str]:
+        return sorted(str(path.relative_to(self.dir)) for path in self.dir.rglob("*.html"))
 
 
 def card_order(page: str) -> list[str]:
@@ -73,13 +63,13 @@ def text_of(page: str) -> str:
 
 
 def test_the_library_lists_every_entry_pinned_first_then_newest(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     assert card_order(page) == ["DSd4Mcp3dD", "DSa1Perm0aA", "DSb2Perm1bB", "DSc3Ctx2cC"]
 
 
 def test_a_card_shows_problem_to_approach_category_creator_date_and_pin(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     card = re.search(r'<a class="card[^"]*" data-shortcode="DSd4Mcp3dD".*?</a>', page, re.DOTALL)
     assert card
@@ -89,11 +79,11 @@ def test_a_card_shows_problem_to_approach_category_creator_date_and_pin(kb: Path
     assert "@sample_creator_four" in text
     assert "2026-10-01" in text
     assert "📌" in text
-    assert 'href="/entry/DSd4Mcp3dD"' in card.group(0)
+    assert 'href="entry/DSd4Mcp3dD.html"' in card.group(0)
 
 
 def test_category_filters_show_counts_in_the_categories_file_order(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     chips = re.findall(r'data-category="([a-z-]+)"[^>]*>[^<]*<span class="count">(\d+)</span>', page)
     assert chips == [("coding-agents", "2"), ("context-and-memory", "1"), ("agents-and-automation", "1")]
@@ -103,7 +93,7 @@ def test_an_entry_in_a_category_no_longer_listed_shows_under_other(kb: Path) -> 
     entry = kb / "entries" / "DSc3Ctx2cC.md"
     entry.write_text(entry.read_text().replace("category: context-and-memory", "category: retired-topic"))
 
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     chips = re.findall(r'data-category="([a-z-]+)"[^>]*>[^<]*<span class="count">(\d+)</span>', page)
     assert chips == [("coding-agents", "2"), ("agents-and-automation", "1"), ("other", "1")]
@@ -112,7 +102,7 @@ def test_an_entry_in_a_category_no_longer_listed_shows_under_other(kb: Path) -> 
 
 
 def test_tool_and_tag_filters_list_every_tool_and_tag(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     assert 'data-tool="Claude Code"' in page
     assert 'data-tag="permissions"' in page
@@ -120,7 +110,7 @@ def test_tool_and_tag_filters_list_every_tool_and_tag(kb: Path) -> None:
 
 
 def test_the_search_payload_has_the_searchable_fields_and_facets(kb: Path) -> None:
-    [entry] = [item for item in payload(Client(kb).page("/")) if item["shortcode"] == "DSa1Perm0aA"]
+    [entry] = [item for item in payload(Site(kb).page("index.html")) if item["shortcode"] == "DSa1Perm0aA"]
 
     assert entry["problem"] == "Claude Code keeps stopping to ask permission for harmless commands"
     assert entry["approach"] == "Allowlist safe commands under permissions.allow in settings.json"
@@ -134,7 +124,7 @@ def test_the_search_payload_has_the_searchable_fields_and_facets(kb: Path) -> No
 
 
 def test_the_library_never_carries_the_transcript_or_on_screen_text(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     # Words that appear only in the raw transcripts of the sample entries.
     assert "hundred times" not in page
@@ -152,7 +142,7 @@ def test_text_from_an_entry_cannot_break_out_of_the_page(kb: Path) -> None:
         )
     )
 
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     assert "<script>alert(1)" not in page
     assert "<b>bold</b>" not in page
@@ -161,42 +151,44 @@ def test_text_from_an_entry_cannot_break_out_of_the_page(kb: Path) -> None:
 
 
 def test_an_empty_knowledge_base_says_so_and_stays_empty(tmp_path: Path) -> None:
-    page = Client(tmp_path).page("/")
+    kb_dir = tmp_path / "kb"
+    kb_dir.mkdir()
+
+    page = Site(kb_dir).page("index.html")
 
     assert "No entries yet" in text_of(page)
-    assert list(tmp_path.iterdir()) == []
+    assert list(kb_dir.iterdir()) == []
 
 
 # Covers
 
 
-def test_a_cover_is_served_and_shown_on_its_card(kb: Path) -> None:
+def test_a_card_shows_its_cover_linked_from_the_knowledge_base_not_copied(kb: Path) -> None:
     (kb / "entries" / "DSa1Perm0aA.jpg").write_bytes(b"\xff\xd8\xff fake jpeg")
-    client = Client(kb)
+    site = Site(kb)
 
-    status, headers, body = client.get("/cover/DSa1Perm0aA.jpg")
-    page = client.page("/")
+    page = site.page("index.html")
 
-    assert (status, headers["Content-Type"], body) == (200, "image/jpeg", b"\xff\xd8\xff fake jpeg")
     card = re.search(r'data-shortcode="DSa1Perm0aA".*?</a>', page, re.DOTALL)
-    assert card and 'src="/cover/DSa1Perm0aA.jpg"' in card.group(0)
+    assert card and 'src="../kb/entries/DSa1Perm0aA.jpg"' in card.group(0)
+    assert (site.dir / "../kb/entries/DSa1Perm0aA.jpg").read_bytes() == b"\xff\xd8\xff fake jpeg"
+    assert not list(site.dir.rglob("*.jpg"))
 
 
 def test_a_card_without_a_cover_gets_a_category_tinted_placeholder(kb: Path) -> None:
-    page = Client(kb).page("/")
+    page = Site(kb).page("index.html")
 
     card = re.search(r'data-shortcode="DSb2Perm1bB".*?</a>', page, re.DOTALL)
     assert card
     assert "<img" not in card.group(0)
     assert 'class="placeholder"' in card.group(0)
-    assert Client(kb).get("/cover/DSb2Perm1bB.jpg")[0] == 404
 
 
 # Entry page
 
 
 def test_the_entry_page_shows_metadata_and_every_section_as_written(kb: Path) -> None:
-    page = Client(kb).page("/entry/DSa1Perm0aA")
+    page = Site(kb).page("entry/DSa1Perm0aA.html")
     text = text_of(page)
 
     for heading in ["Summary", "The technique", "Step-by-step instructions", "Prerequisites", "When this is useful", "Caveats"]:
@@ -210,13 +202,13 @@ def test_the_entry_page_shows_metadata_and_every_section_as_written(kb: Path) ->
 def test_the_entry_page_cover_links_to_the_reel(kb: Path) -> None:
     (kb / "entries" / "DSa1Perm0aA.jpg").write_bytes(b"\xff\xd8\xff")
 
-    page = Client(kb).page("/entry/DSa1Perm0aA")
+    page = Site(kb).page("entry/DSa1Perm0aA.html")
 
-    assert re.search(r'<a [^>]*href="https://www.instagram.com/reel/DSa1Perm0aA/"[^>]*>\s*<img[^>]*src="/cover/DSa1Perm0aA.jpg"', page)
+    assert re.search(r'<a [^>]*href="https://www.instagram.com/reel/DSa1Perm0aA/"[^>]*>\s*<img[^>]*src="../../kb/entries/DSa1Perm0aA.jpg"', page)
 
 
 def test_the_transcript_and_on_screen_text_are_folded_away(kb: Path) -> None:
-    page = Client(kb).page("/entry/DSa1Perm0aA")
+    page = Site(kb).page("entry/DSa1Perm0aA.html")
 
     folded = re.search(r"<details>(.*?)</details>", page, re.DOTALL)
     assert folded
@@ -225,19 +217,41 @@ def test_the_transcript_and_on_screen_text_are_folded_away(kb: Path) -> None:
 
 
 def test_the_entry_page_has_a_copy_ai_kb_question_button(kb: Path) -> None:
-    page = Client(kb).page("/entry/DSa1Perm0aA")
+    page = Site(kb).page("entry/DSa1Perm0aA.html")
 
     button = re.search(r'<button[^>]*data-copy="([^"]*)"', page)
     assert button
     assert unescape(button.group(1)) == '/ai-kb how do I apply "Allowlist safe commands under permissions.allow in settings.json" (entry DSa1Perm0aA)?'
 
 
-@pytest.mark.parametrize("path", ["/entry/NoSuchEntry", "/entry/..%2Fcategories", "/entry/../index", "/cover/../state.json", "/nowhere"])
-def test_unknown_pages_are_not_found(kb: Path, path: str) -> None:
-    status, headers, body = Client(kb).get(path)
+def test_every_entry_gets_a_page_and_nothing_else_is_written(kb: Path) -> None:
+    assert Site(kb).pages() == [
+        "entry/DSa1Perm0aA.html",
+        "entry/DSb2Perm1bB.html",
+        "entry/DSc3Ctx2cC.html",
+        "entry/DSd4Mcp3dD.html",
+        "index.html",
+        "status.html",
+    ]
 
-    assert status == 404
-    assert "Not found" in body.decode()
+
+def test_the_page_of_a_deleted_entry_is_removed_on_the_next_build(kb: Path) -> None:
+    Site(kb)
+    (kb / "entries" / "DSb2Perm1bB.md").unlink()
+
+    assert "entry/DSb2Perm1bB.html" not in Site(kb).pages()
+
+
+def test_every_link_between_pages_is_relative_and_resolves_to_a_built_file(kb: Path) -> None:
+    (kb / "entries" / "DSa1Perm0aA.jpg").write_bytes(b"\xff\xd8\xff")
+    site = Site(kb)
+
+    for name in site.pages():
+        for link in re.findall(r'(?:href|src)="([^"]+)"', site.page(name)):
+            if link.startswith("https://"):
+                continue
+            assert not link.startswith("/"), f"{name}: {link} is not relative"
+            assert (site.dir / name).parent.joinpath(link).resolve().is_file(), f"{name}: {link} leads nowhere"
 
 
 # Status
@@ -258,7 +272,7 @@ def write_state(kb_dir: Path) -> None:
 def test_status_lists_pending_and_failed_reels_and_the_processed_count(kb: Path) -> None:
     write_state(kb)
 
-    page = Client(kb).page("/status")
+    page = Site(kb).page("status.html")
     text = " ".join(text_of(page).split())
 
     assert "DPend1" in text and "2 attempts" in text and "TimeoutError: Groq timed out" in text
@@ -268,7 +282,7 @@ def test_status_lists_pending_and_failed_reels_and_the_processed_count(kb: Path)
 
 
 def test_status_shows_the_last_cycle_runs_with_links(kb: Path) -> None:
-    page = Client(kb).page("/status")
+    page = Site(kb).page("status.html")
 
     assert 'id="runs"' in page
     assert 'href="https://github.com/ncr08/InstaAutomation/actions/runs/123"' in page
@@ -277,41 +291,48 @@ def test_status_shows_the_last_cycle_runs_with_links(kb: Path) -> None:
 
 
 def test_the_runs_panel_is_left_out_when_gh_is_unavailable(kb: Path) -> None:
-    page = Client(kb, cycle_runs=FakeCycleRuns(None)).page("/status")
+    page = Site(kb, cycle_runs=FakeCycleRuns(None)).page("status.html")
 
     assert 'id="runs"' not in page
     assert "reels processed" in page
 
 
-def test_a_failed_update_shows_a_banner_with_the_reason(kb: Path) -> None:
-    client = Client(kb, updater=FakeUpdater("Not possible to fast-forward, aborting."))
+def test_the_status_page_says_when_the_snapshot_was_taken(kb: Path) -> None:
+    assert "Snapshot taken 2026-10-31 09:30 UTC" in Site(kb).page("status.html")
 
-    for path in ["/", "/entry/DSa1Perm0aA", "/status"]:
-        assert "Not possible to fast-forward, aborting." in client.page(path)
+
+def test_a_failed_update_shows_a_banner_with_the_last_good_update_and_the_reason(kb: Path) -> None:
+    Site(kb)
+
+    site = Site(kb, update_failure="Not possible to fast-forward, aborting.", now=NOW + timedelta(hours=3))
+
+    for name in ["index.html", "entry/DSa1Perm0aA.html", "status.html"]:
+        banner = re.search(r'<div class="banner">(.*?)</div>', site.page(name))
+        assert banner, name
+        assert "Not updated since 2026-10-31 09:30 UTC" in banner.group(1)
+        assert "Not possible to fast-forward, aborting." in banner.group(1)
+
+
+def test_a_failed_update_on_the_very_first_build_still_explains_itself(kb: Path) -> None:
+    page = Site(kb, update_failure="git is not installed").page("index.html")
+
+    assert "git is not installed" in page
+    assert 'class="banner"' in page
 
 
 def test_no_banner_when_the_update_succeeded(kb: Path) -> None:
-    assert 'class="banner"' not in Client(kb).page("/")
+    Site(kb, update_failure="offline")
+
+    assert 'class="banner"' not in Site(kb).page("index.html")
 
 
-def test_the_update_runs_once_at_startup(kb: Path) -> None:
-    updater = FakeUpdater()
-    client = Client(kb, updater=updater)
-
-    client.page("/")
-    client.page("/status")
-
-    assert updater.calls == 1
-
-
-def test_no_request_writes_to_the_knowledge_base(kb: Path) -> None:
+def test_building_never_writes_to_the_knowledge_base(kb: Path) -> None:
     write_state(kb)
     (kb / "categories.yml").unlink()
     before = {path: path.read_bytes() for path in kb.rglob("*") if path.is_file()}
-    client = Client(kb)
 
-    for path in ["/", "/entry/DSa1Perm0aA", "/entry/missing", "/status", "/cover/DSa1Perm0aA.jpg"]:
-        client.get(path)
+    Site(kb)
+    Site(kb, update_failure="offline")
 
     assert {path: path.read_bytes() for path in kb.rglob("*") if path.is_file()} == before
 
@@ -319,7 +340,7 @@ def test_no_request_writes_to_the_knowledge_base(kb: Path) -> None:
 def test_an_unreadable_state_file_degrades_the_status_view_instead_of_failing(kb: Path) -> None:
     (kb / "state.json").write_text("{ half-written")
 
-    page = Client(kb).page("/status")
+    page = Site(kb).page("status.html")
 
     assert "could not be read" in page
     assert 'id="runs"' in page

@@ -6,3 +6,5 @@ __pycache__/
 .env
 # Left behind if a run is killed mid-write of the state file.
 kb/*.tmp
+# The static site, rebuilt from kb/ by `python -m instaautomation export`.
+site/

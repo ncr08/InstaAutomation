@@ -1,78 +1,93 @@
-"""The frontend: a local, read-only view of the knowledge base and the pipeline, as a standard-library WSGI app."""
+"""The frontend: a static, read-only site built from the knowledge base and opened from a bookmark, no server needed."""
 
 import json
-import re
+import os
 import zlib
 from collections import Counter
-from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 from pathlib import Path
-from wsgiref.types import StartResponse, WSGIApplication, WSGIEnvironment
 
 from markdown_it import MarkdownIt
 
 from instaautomation.categories import category_name, read_categories
 from instaautomation.entry import Entry, cover_path, read_entries
 from instaautomation.navigation import by_category, filed_under, pinned_then_newest
-from instaautomation.ports import CycleRun, CycleRuns, Updater
+from instaautomation.ports import Clock, CycleRun, CycleRuns
 from instaautomation.state import STATE_FILE, QueueItem, load_state
 
-SHORTCODE = r"[A-Za-z0-9_-]+"
 SECTIONS_SEARCHED = {"summary": "Summary", "technique": "The technique", "steps": "Step-by-step instructions"}
+LAST_UPDATED = ".last-updated"
+"""In the site folder: when the knowledge base was last pulled successfully, for the banner after a failed pull."""
 
 # No raw HTML: entry text is written by a model from whatever a stranger put in a caption.
 _markdown = MarkdownIt("commonmark", {"html": False})
 
 
-class _NotFound(Exception):
-    pass
+@dataclass(frozen=True)
+class _Links:
+    """Relative links, so the site works opened straight from disk; entry pages sit one folder down."""
+
+    root: str
+    covers: str
+    """The knowledge base's entries folder, relative to the site folder: covers are linked, not copied."""
+
+    def page(self, name: str) -> str:
+        return f"{self.root}{name}.html"
+
+    def entry(self, shortcode: str) -> str:
+        return f"{self.root}entry/{shortcode}.html"
+
+    def cover(self, shortcode: str) -> str:
+        return f"{self.root}{self.covers}/{shortcode}.jpg"
 
 
-def make_app(kb_dir: Path, updater: Updater, cycle_runs: CycleRuns) -> WSGIApplication:
-    """Brings the knowledge base up to date once, now; every request then only reads the files."""
-    banner = updater.update()
+def build_site(kb_dir: Path, out_dir: Path, *, update_failure: str | None, cycle_runs: CycleRuns, clock: Clock) -> None:
+    """Writes the library, status and entry pages into out_dir; never writes to the knowledge base.
 
-    def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
-        path = environ.get("PATH_INFO") or "/"
-        try:
-            if path == "/":
-                return _html(start_response, _page("Library", _library(kb_dir), banner, script=LIBRARY_JS))
-            if path == "/status":
-                return _html(start_response, _page("Status", _status(kb_dir, cycle_runs), banner))
-            if match := re.fullmatch(rf"/entry/({SHORTCODE})", path):
-                entry = _find(kb_dir, match.group(1))
-                return _html(start_response, _page(entry.listing.problem, _entry_page(kb_dir, entry), banner, script=ENTRY_JS))
-            if match := re.fullmatch(rf"/cover/({SHORTCODE})\.jpg", path):
-                cover = cover_path(kb_dir, match.group(1))
-                if not cover.is_file():
-                    raise _NotFound
-                start_response("200 OK", [("Content-Type", "image/jpeg"), ("Cache-Control", "no-cache")])
-                return [cover.read_bytes()]
-            raise _NotFound
-        except _NotFound:
-            body = _page("Not found", '<p class="empty">Not found. <a href="/">Back to the library</a></p>', banner)
-            return _html(start_response, body, "404 Not Found")
+    update_failure is why pulling the knowledge base just failed, or None if it succeeded.
+    """
+    now = clock.now()
+    marker = out_dir / LAST_UPDATED
+    if update_failure is None:
+        last_updated: datetime | None = now
+    else:
+        last_updated = datetime.fromisoformat(marker.read_text().strip()) if marker.is_file() else None
+    banner = _banner(update_failure, last_updated)
+    covers = Path(os.path.relpath((kb_dir / "entries").resolve(), out_dir.resolve())).as_posix()
+    top, nested = _Links("", covers), _Links("../", covers)
+    # Shortcodes are entry file names, so a page can't land outside the site.
+    entries = read_entries(kb_dir)
+    pages = {
+        "index.html": _page("Library", _library(kb_dir, entries, top), banner, top, script=LIBRARY_JS),
+        "status.html": _page("Status", _status(kb_dir, cycle_runs, now), banner, top),
+    }
+    for entry in entries:
+        pages[f"entry/{entry.shortcode}.html"] = _page(entry.listing.problem, _entry_page(kb_dir, entry, nested), banner, nested, script=ENTRY_JS)
+    (out_dir / "entry").mkdir(parents=True, exist_ok=True)
+    for name, html in pages.items():
+        (out_dir / name).write_text(html)
+    # Pages of entries that have since been deleted from the knowledge base.
+    for stale in (out_dir / "entry").glob("*.html"):
+        if f"entry/{stale.name}" not in pages:
+            stale.unlink()
+    if update_failure is None:
+        marker.write_text(now.isoformat() + "\n")
 
-    return app
 
-
-def _html(start_response: StartResponse, body: str, status: str = "200 OK") -> list[bytes]:
-    start_response(status, [("Content-Type", "text/html; charset=utf-8")])
-    return [body.encode()]
-
-
-def _find(kb_dir: Path, shortcode: str) -> Entry:
-    entry = next((entry for entry in read_entries(kb_dir) if entry.shortcode == shortcode), None)
-    if entry is None:
-        raise _NotFound
-    return entry
+def _banner(update_failure: str | None, last_updated: datetime | None) -> str | None:
+    if update_failure is None:
+        return None
+    since = f"since {last_updated.strftime('%Y-%m-%d %H:%M')} UTC" if last_updated else "lately"
+    return f"Not updated {since}: {update_failure}. This is built from your local files."
 
 
 # Library
 
 
-def _library(kb_dir: Path) -> str:
-    entries = {entry.shortcode: entry for entry in read_entries(kb_dir)}
+def _library(kb_dir: Path, all_entries: list[Entry], links: _Links) -> str:
+    entries = {entry.shortcode: entry for entry in all_entries}
     if not entries:
         return '<p class="empty">No entries yet. Share a reel with the bot; the next cycle adds it here.</p>'
     categories = read_categories(kb_dir)
@@ -85,7 +100,7 @@ def _library(kb_dir: Path) -> str:
     tools = Counter(tool for entry in ordered for tool in entry.tools)
     tags = Counter(tag for entry in ordered for tag in entry.tags)
     payload = [_searchable(entry, filed_under(entry.listing, categories)) for entry in ordered]
-    cards = "".join(_card(kb_dir, entry, filed_under(entry.listing, categories)) for entry in ordered)
+    cards = "".join(_card(kb_dir, entry, filed_under(entry.listing, categories), links) for entry in ordered)
     return f"""
 <div class="library">
   <aside class="filters">
@@ -132,13 +147,13 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
 
 
-def _card(kb_dir: Path, entry: Entry, category: str) -> str:
+def _card(kb_dir: Path, entry: Entry, category: str, links: _Links) -> str:
     listing = entry.listing
     pin = '<span class="pin" title="Pinned">📌</span>' if listing.pinned else ""
     creator = f"@{escape(entry.creator)} · " if entry.creator else ""
     return f"""
-<a class="card" data-shortcode="{listing.shortcode}" href="/entry/{listing.shortcode}">
-  {_cover(kb_dir, entry, category)}
+<a class="card" data-shortcode="{listing.shortcode}" href="{links.entry(listing.shortcode)}">
+  {_cover(kb_dir, entry, category, links)}
   <div class="card-body">
     <div class="card-top"><span class="cat" style="--hue: {_hue(category)}">{escape(category_name(category))}</span>{pin}</div>
     <p class="problem">{escape(listing.problem)} <span class="arrow">→</span> <span class="approach">{escape(listing.approach)}</span></p>
@@ -147,9 +162,9 @@ def _card(kb_dir: Path, entry: Entry, category: str) -> str:
 </a>"""
 
 
-def _cover(kb_dir: Path, entry: Entry, category: str) -> str:
+def _cover(kb_dir: Path, entry: Entry, category: str, links: _Links) -> str:
     if cover_path(kb_dir, entry.shortcode).is_file():
-        return f'<img class="cover" src="/cover/{entry.shortcode}.jpg" alt="" loading="lazy">'
+        return f'<img class="cover" src="{escape(links.cover(entry.shortcode))}" alt="" loading="lazy">'
     return f'<div class="placeholder" style="--hue: {_hue(category)}"><span>{escape(category_name(category))}</span></div>'
 
 
@@ -161,11 +176,11 @@ def _hue(category: str) -> int:
 # Entry page
 
 
-def _entry_page(kb_dir: Path, entry: Entry) -> str:
+def _entry_page(kb_dir: Path, entry: Entry, links: _Links) -> str:
     listing = entry.listing
     category = filed_under(listing, read_categories(kb_dir))
     reel_url = entry.source_url if entry.source_url.startswith("https://") else ""
-    cover = _cover(kb_dir, entry, category)
+    cover = _cover(kb_dir, entry, category, links)
     if reel_url:
         cover = f'<a class="hero" href="{escape(reel_url)}" target="_blank" rel="noopener" title="Watch on Instagram">{cover}</a>'
     question = f'/ai-kb how do I apply "{listing.approach}" (entry {listing.shortcode})?'
@@ -180,7 +195,7 @@ def _entry_page(kb_dir: Path, entry: Entry) -> str:
     sections = "".join(f"<section><h2>{escape(heading)}</h2>{_markdown.render(text)}</section>" for heading, text in entry.sections().items())
     watch = f'<a class="button" href="{escape(reel_url)}" target="_blank" rel="noopener">Watch the reel ↗</a>' if reel_url else ""
     return f"""
-<p><a href="/">← Library</a></p>
+<p><a href="{links.page('index')}">← Library</a></p>
 <article class="entry">
   <div class="entry-head">
     {cover}
@@ -208,10 +223,11 @@ def _tags(values: list[str]) -> str:
 # Status
 
 
-def _status(kb_dir: Path, cycle_runs: CycleRuns) -> str:
+def _status(kb_dir: Path, cycle_runs: CycleRuns, now: datetime) -> str:
     runs = cycle_runs.latest()
     return f"""
 <h1>Pipeline status</h1>
+<p class="muted">Snapshot taken {now.strftime("%Y-%m-%d %H:%M")} UTC; rebuilt every hour.</p>
 {_queue_state(kb_dir)}
 {_runs(runs) if runs is not None else ""}"""
 
@@ -254,12 +270,8 @@ def _runs(runs: list[CycleRun]) -> str:
 # Layout
 
 
-def _page(title: str, body: str, banner: str | None, script: str = "") -> str:
-    notice = (
-        f'<div class="banner">Could not update the knowledge base, so these are your local files and may be out of date: {escape(banner)}</div>'
-        if banner
-        else ""
-    )
+def _page(title: str, body: str, banner: str | None, links: _Links, script: str = "") -> str:
+    notice = f'<div class="banner">{escape(banner)}</div>' if banner else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -269,7 +281,7 @@ def _page(title: str, body: str, banner: str | None, script: str = "") -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header><a class="brand" href="/">AI knowledge base</a><nav><a href="/">Library</a><a href="/status">Status</a></nav></header>
+<header><a class="brand" href="{links.page('index')}">AI knowledge base</a><nav><a href="{links.page('index')}">Library</a><a href="{links.page('status')}">Status</a></nav></header>
 {notice}
 <main>{body}</main>
 <script>{script}</script>

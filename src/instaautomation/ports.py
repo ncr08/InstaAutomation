@@ -99,12 +99,6 @@ class Clock(Protocol):
     def now(self) -> datetime: ...
 
 
-class Updater(Protocol):
-    def update(self) -> str | None:
-        """Bring the knowledge base up to date without touching local changes; the reason it couldn't, or None."""
-        ...
-
-
 @dataclass(frozen=True)
 class CycleRun:
     started_at: datetime

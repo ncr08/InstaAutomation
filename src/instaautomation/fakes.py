@@ -111,16 +111,6 @@ class FixedClock:
         return self._now
 
 
-class FakeUpdater:
-    def __init__(self, failure: str | None = None) -> None:
-        self._failure = failure
-        self.calls = 0
-
-    def update(self) -> str | None:
-        self.calls += 1
-        return self._failure
-
-
 class FakeCycleRuns:
     def __init__(self, runs: list[CycleRun] | None) -> None:
         """None stands for gh being missing or logged out."""
