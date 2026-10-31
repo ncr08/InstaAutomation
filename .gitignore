@@ -5,6 +5,6 @@ __pycache__/
 .mypy_cache/
 .env
 # The knowledge base is its own private repo, cloned here as kb/.
-kb/
+/kb/
 # The static site, rebuilt from kb/ by `python -m instaautomation export`.
 site/

@@ -1,0 +1,41 @@
+{
+  "offset": 0,
+  "pending": [
+    {
+      "shortcode": "DDemoWait1",
+      "url": "https://www.instagram.com/reel/DDemoWait1/",
+      "ref": {
+        "chat_id": 1,
+        "message_id": 1
+      },
+      "attempts": 1,
+      "last_error": "TimeoutError: Groq timed out",
+      "last_attempt_at": "2026-10-31T06:00:00+00:00"
+    }
+  ],
+  "failed": [
+    {
+      "shortcode": "DDemoPhoto",
+      "url": "https://www.instagram.com/p/DDemoPhoto/",
+      "ref": {
+        "chat_id": 1,
+        "message_id": 2
+      },
+      "attempts": 3,
+      "last_error": "NotAVideo: post DDemoPhoto has no video",
+      "last_attempt_at": "2026-10-30T22:00:00+00:00"
+    }
+  ],
+  "processed": [
+    "DMo5Hook4eE",
+    "DMp6Plan5fF",
+    "DMq7Cost6gG",
+    "DMr8Caps7hH",
+    "DMs9Pdfs8iI",
+    "DMt0Meet9jJ",
+    "DSa1Perm0aA",
+    "DSb2Perm1bB",
+    "DSc3Ctx2cC",
+    "DSd4Mcp3dD"
+  ]
+}
