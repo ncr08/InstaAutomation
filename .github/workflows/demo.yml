@@ -1,0 +1,46 @@
+name: demo
+
+# The live demo on GitHub Pages: the static site built from the made-up knowledge base in demo/kb.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --no-dev
+      - name: Build the demo site
+        # Blank on purpose: the demo must never carry an API key, so it has no AI search.
+        env:
+          DEEPSEEK_API_KEY: ""
+        run: |
+          mkdir -p _site
+          cp -r demo/kb _site/kb
+          uv run --no-dev python -m instaautomation export _site/kb --out _site --no-pull
+          if grep -q 'id="ai"' _site/index.html; then echo "::error::AI search settings ended up in the demo"; exit 1; fi
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

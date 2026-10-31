@@ -4,7 +4,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .env
-# Left behind if a run is killed mid-write of the state file.
-kb/*.tmp
+# The knowledge base is its own private repo, cloned here as kb/.
+kb/
 # The static site, rebuilt from kb/ by `python -m instaautomation export`.
 site/

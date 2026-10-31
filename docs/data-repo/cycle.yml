@@ -20,7 +20,14 @@ jobs:
     # A hung run would otherwise hold the concurrency lock for six hours.
     timeout-minutes: 30
     steps:
+      # The code is public; this repo, the knowledge base, goes where the code expects it.
       - uses: actions/checkout@v4
+        with:
+          # Your fork of the public code repo.
+          repository: ncr08/InstaAutomation
+      - uses: actions/checkout@v4
+        with:
+          path: kb
       - uses: astral-sh/setup-uv@v6
       # The adapters shell out to ffmpeg/ffprobe (audio, frames) and tesseract (on-screen text).
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg tesseract-ocr
@@ -37,9 +44,9 @@ jobs:
       # and Telegram drops messages once the offset moves past them.
       - name: Commit knowledge-base changes
         if: always()
+        working-directory: kb
         run: |
-          [ -d kb ] || exit 0
-          git add kb
+          git add -A
           if git diff --cached --quiet; then
             echo "No knowledge-base changes."
             exit 0

@@ -3,7 +3,7 @@
 
 - adds one import line for the Claude block to the global Claude instructions (nothing else there is touched),
 - symlinks the /ai-kb skill into the Claude skills directory,
-- adds a SessionStart hook that quietly pulls this clone, giving up fast when offline,
+- adds a SessionStart hook that quietly pulls the knowledge base (the private data repo cloned as kb/), giving up fast when offline,
 - installs a launchd job that pulls this clone and rebuilds the static site in site/ every hour,
   at login and after the Mac wakes; the log goes to ~/Library/Logs.
 
@@ -168,7 +168,7 @@ def _pull_command() -> str:
     # Its output would land in Claude's context, hence silent; it must never fail or prompt, hence || true and no TTY.
     return (
         "GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=5' "
-        f"git -C {shlex.quote(str(REPO))} -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 "
+        f"git -C {shlex.quote(str(REPO / 'kb'))} -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 "
         "pull --ff-only --quiet >/dev/null 2>&1 || true"
     )
 

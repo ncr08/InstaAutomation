@@ -2,7 +2,7 @@
 
     python -m instaautomation [KB_DIR]              one cycle with the real adapters, as the scheduled workflow runs it
     python -m instaautomation covers [KB_DIR]       one-off: fetch a cover for every entry that has none
-    python -m instaautomation export [KB_DIR] [--out SITE_DIR]
+    python -m instaautomation export [KB_DIR] [--out SITE_DIR] [--no-pull]
                                                     pull, then build the static site (default: site/index.html)
 
 KB_DIR defaults to kb. Secrets are read from the environment, under the names listed in .env.example;
@@ -76,8 +76,9 @@ def export(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="python -m instaautomation export", description="Pull the knowledge base, then build the static site.")
     parser.add_argument("kb_dir", nargs="?", type=Path, default=Path("kb"))
     parser.add_argument("--out", type=Path, default=Path("site"))
+    parser.add_argument("--no-pull", action="store_true", help="build from the files as they are, e.g. the demo knowledge base")
     args = parser.parse_args(argv)
-    failure = GitUpdater(args.kb_dir).update()
+    failure = None if args.no_pull else GitUpdater(args.kb_dir).update()
     if failure:
         print(f"Could not update the knowledge base, building from local files: {failure}")
     # launchd starts the job without the owner's shell environment, so the clone's .env is the usual source.

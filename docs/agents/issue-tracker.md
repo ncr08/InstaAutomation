@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and specs for this project live as GitHub issues on the private data repo `ncr08/InstaAutomation-kb`, not on this public code repo. Use the `gh` CLI for all operations, with `--repo ncr08/InstaAutomation-kb` (or run it inside the `kb/` clone).
 
 ## Conventions
 
@@ -12,7 +12,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+Inside the code clone, `gh` would infer the public code repo, so always pass `--repo ncr08/InstaAutomation-kb` or run it from `kb/`.
 
 ## Pull requests as a triage surface
 

@@ -267,10 +267,21 @@ TOTAL_STAGES=6
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 TELEGRAM_BOT_TOKEN="" TELEGRAM_OWNER_ID="" HIKERAPI_KEY="" GROQ_API_KEY="" DEEPSEEK_API_KEY=""
 
+# The secrets belong to the private data repo, cloned as kb/, never to this public code repo.
+if [[ -d kb/.git ]]; then
+  GH_REPO=$(git -C kb remote get-url origin | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
+  export GH_REPO
+fi
+
 banner "InstaAutomation setup: Telegram bot and API keys"
 
 stage "Preflight: GitHub CLI and local .env"
-say "Every value is stored as a GitHub Actions secret on this repo, using the gh CLI."
+if [[ -z "${GH_REPO:-}" ]]; then
+  warn "No data repo cloned as kb/ yet: create a private repo for your knowledge base and clone it into kb/ (see the README)."
+  pause "Press Enter once that's done, or Ctrl+C to stop."
+  exec "$0"
+fi
+say "Every value is stored as a GitHub Actions secret on your private data repo ($GH_REPO), using the gh CLI."
 if gh auth status >/dev/null 2>&1 && gh repo view >/dev/null 2>&1; then
   note "✓ gh is logged in and can see $(gh repo view --json nameWithOwner -q .nameWithOwner)"
 else

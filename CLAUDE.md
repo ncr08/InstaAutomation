@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues on `ncr08/InstaAutomation` (via `gh`). See `docs/agents/issue-tracker.md`.
+Issues and specs live in GitHub Issues on the private data repo `ncr08/InstaAutomation-kb` (via `gh --repo ncr08/InstaAutomation-kb`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

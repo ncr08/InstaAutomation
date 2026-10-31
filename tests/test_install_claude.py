@@ -71,7 +71,7 @@ def test_fresh_install_imports_the_block_links_the_skill_and_pulls_on_session_st
     assert (tmp_path / "CLAUDE.md").read_text() == IMPORT_LINE + "\n"
     assert (tmp_path / "skills" / "ai-kb").resolve() == ROOT / "skills" / "ai-kb"
     [command] = session_start_commands(tmp_path)
-    assert f"git -C {ROOT} " in command and "pull --ff-only" in command
+    assert f"git -C {ROOT / 'kb'} " in command and "pull --ff-only" in command
 
 
 def test_existing_instructions_and_settings_are_kept_and_a_rerun_changes_nothing(tmp_path: Path) -> None:
