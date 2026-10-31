@@ -80,8 +80,24 @@ def export(argv: list[str]) -> None:
     failure = GitUpdater(args.kb_dir).update()
     if failure:
         print(f"Could not update the knowledge base, building from local files: {failure}")
-    build_site(args.kb_dir, args.out, update_failure=failure, cycle_runs=GhCycleRuns(args.kb_dir), clock=SystemClock())
+    # launchd starts the job without the owner's shell environment, so the clone's .env is the usual source.
+    ai_key = os.environ.get("DEEPSEEK_API_KEY") or _dotenv(args.kb_dir.resolve().parent / ".env").get("DEEPSEEK_API_KEY")
+    if not ai_key:
+        print("No DEEPSEEK_API_KEY in the environment or .env: building without AI search.")
+    build_site(args.kb_dir, args.out, update_failure=failure, cycle_runs=GhCycleRuns(args.kb_dir), clock=SystemClock(), ai_key=ai_key)
     print(f"Wrote {(args.out / 'index.html').resolve().as_uri()}")
+
+
+def _dotenv(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines; blank lines, comments and anything else are skipped."""
+    if not path.is_file():
+        return {}
+    values = {}
+    for line in path.read_text().splitlines():
+        key, sep, value = line.strip().removeprefix("export ").partition("=")
+        if sep and key and not key.startswith("#"):
+            values[key.strip()] = value.strip().strip("'\"")
+    return values
 
 
 if __name__ == "__main__":
