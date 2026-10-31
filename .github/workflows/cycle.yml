@@ -2,7 +2,8 @@ name: cycle
 
 on:
   schedule:
-    - cron: "0 */8 * * *"
+    # Hourly; a failed reel waits out the pipeline's retry delay between attempts.
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 # Never two cycles at once, and never cancel one mid-run: its queue state would be lost.

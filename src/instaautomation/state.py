@@ -18,6 +18,8 @@ class QueueItem:
     ref: MessageRef
     attempts: int = 0
     last_error: str | None = None
+    last_attempt_at: str | None = None
+    """ISO 8601 UTC time of the last failed attempt; None until the first one."""
 
 
 @dataclass
@@ -58,4 +60,6 @@ def _item(raw: dict[str, Any]) -> QueueItem:
         ref=MessageRef(**raw["ref"]),
         attempts=raw["attempts"],
         last_error=raw["last_error"],
+        # Absent from state files written before retries were spaced out.
+        last_attempt_at=raw.get("last_attempt_at"),
     )

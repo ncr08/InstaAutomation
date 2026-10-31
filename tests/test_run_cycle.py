@@ -1,7 +1,7 @@
 import logging
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ from instaautomation.fakes import (
     FakeTranscriber,
     FixedClock,
 )
-from instaautomation.pipeline import run_cycle
+from instaautomation.pipeline import RETRY_DELAY, run_cycle
 from instaautomation.ports import EntryDraft, Message, Ports, Reel
 from instaautomation.state import STATE_FILE, load_state
 
@@ -97,6 +97,9 @@ class World:
             self.kb_dir,
             owner_id=OWNER_ID,
         )
+
+    def wait_out_retry_delay(self) -> None:
+        self.now += RETRY_DELAY
 
     def share(self, message_id: int, text: str = SHARED_LINK, sender_id: int = OWNER_ID) -> None:
         self.inbox.send(
@@ -269,6 +272,7 @@ def test_a_failure_in_any_port_leaves_the_reel_pending_and_a_later_cycle_process
     assert (item.shortcode, item.url, item.ref.message_id, item.attempts) == (SHORTCODE, REEL_URL, 42, 1)
     assert "service unavailable" in (item.last_error or "")
 
+    world.wait_out_retry_delay()
     world.cycle()
 
     assert world.inbox.reactions == [(42, "✅", None)]
@@ -282,10 +286,12 @@ def test_third_failure_moves_the_reel_to_the_failed_list_and_reacts_with_a_one_l
     break_port(world, "reel_source", RuntimeError("HikerAPI returned 404:\nmedia not found"), times=3)
 
     world.cycle()
+    world.wait_out_retry_delay()
     world.cycle()
     assert load_state(tmp_path).pending[0].attempts == 2
     assert world.inbox.reactions == []
 
+    world.wait_out_retry_delay()
     world.cycle()
 
     state = load_state(tmp_path)
@@ -298,9 +304,83 @@ def test_third_failure_moves_the_reel_to_the_failed_list_and_reacts_with_a_one_l
     assert "HikerAPI returned 404: media not found" in reason
     assert world.kb_files() == {}
 
+    world.wait_out_retry_delay()
     world.cycle()
 
     assert len(world.inbox.reactions) == 1
+
+
+def test_a_failed_reel_is_not_tried_again_until_the_retry_delay_has_passed(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    break_port(world, "reel_source", RuntimeError("HikerAPI down"))
+    world.cycle()
+
+    world.now += RETRY_DELAY - timedelta(minutes=1)
+    world.cycle()
+
+    [item] = load_state(tmp_path).pending
+    assert (item.attempts, item.ref.message_id) == (1, 42)
+    assert world.inbox.reactions == []
+
+    world.now += timedelta(minutes=1)
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+    assert load_state(tmp_path).pending == []
+
+
+def test_a_new_reel_is_processed_while_a_failed_one_waits(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    break_port(world, "reel_source", RuntimeError("HikerAPI down"))
+    world.cycle()
+
+    world.now += timedelta(hours=1)
+    world.share(message_id=43, text=OTHER_LINK)
+    world.cycle()
+
+    assert world.inbox.reactions == [(43, "✅", None)]
+    assert [item.shortcode for item in load_state(tmp_path).pending] == [SHORTCODE]
+
+
+def test_resharing_a_reel_that_was_given_up_on_tries_it_in_the_same_cycle(tmp_path: Path) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    break_port(world, "reel_source", RuntimeError("HikerAPI down"), times=3)
+    for _ in range(3):
+        world.wait_out_retry_delay()
+        world.cycle()
+
+    world.share(message_id=43)
+    world.cycle()
+
+    assert world.inbox.reactions[-1] == (43, "✅", None)
+    assert load_state(tmp_path).failed == []
+
+
+def test_a_pending_reel_from_a_state_file_without_attempt_times_is_tried_right_away(tmp_path: Path) -> None:
+    (tmp_path / STATE_FILE).write_text(
+        '{"offset": 0, "processed": [], "failed": [], "pending": [{"shortcode": "%s", "url": "%s", '
+        '"ref": {"chat_id": %d, "message_id": 42}, "attempts": 1, "last_error": "HikerAPI down"}]}' % (SHORTCODE, REEL_URL, OWNER_ID)
+    )
+    world = make_world(tmp_path)
+
+    world.cycle()
+
+    assert world.inbox.reactions == [(42, "✅", None)]
+
+
+def test_the_log_lists_a_reel_waiting_out_its_retry_delay(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    world = make_world(tmp_path)
+    world.share(message_id=42)
+    break_port(world, "reel_source", RuntimeError("HikerAPI down"))
+    world.cycle()
+    caplog.set_level(logging.INFO)
+
+    world.cycle()
+
+    assert reel_log(caplog) == [f"waiting {SHORTCODE}: attempt 2/3 not before 2026-10-30 20:00 UTC"]
 
 
 class Crash(BaseException):
@@ -344,6 +424,7 @@ def test_sharing_a_reel_that_is_still_pending_does_not_queue_it_twice(tmp_path: 
     world.cycle()
 
     world.share(message_id=43)
+    world.wait_out_retry_delay()
     world.cycle()
 
     assert sorted(path for path in world.kb_files() if path.startswith("entries/")) == [f"entries/{SHORTCODE}.jpg", f"entries/{SHORTCODE}.md"]
@@ -415,6 +496,7 @@ def test_resending_a_failed_reel_takes_it_off_the_failed_list_once_it_succeeds(t
     break_port(world, "reel_source", RuntimeError("HikerAPI down"), times=3)
     for _ in range(3):
         world.cycle()
+        world.wait_out_retry_delay()
 
     world.share(message_id=43)
     world.cycle()
@@ -591,6 +673,7 @@ def test_a_reel_whose_entry_was_written_just_before_a_crash_is_still_added_on_re
     world.share(message_id=42)
     break_port(world, "transcriber", RuntimeError("Groq timeout"))
     world.cycle()
+    world.wait_out_retry_delay()
     state_before_success = (tmp_path / STATE_FILE).read_text()
     world.cycle()
 
@@ -642,6 +725,7 @@ def test_the_log_lists_each_failed_attempt_and_the_reel_given_up_on(tmp_path: Pa
 
     for _ in range(3):
         world.cycle()
+        world.wait_out_retry_delay()
 
     assert reel_log(caplog) == [
         f"queued {SHORTCODE}",
@@ -664,6 +748,7 @@ def test_the_log_lists_a_repeat_share_as_skipped(tmp_path: Path, caplog: pytest.
     world.share(message_id=44)
     world.share(message_id=45, text=OTHER_LINK)
     world.transcriber.fail_next(TimeoutError("Groq timed out"))
+    world.wait_out_retry_delay()
     world.cycle()
 
     assert reel_log(caplog) == [

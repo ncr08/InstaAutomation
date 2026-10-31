@@ -3,6 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from instaautomation.categories import load_categories
@@ -15,6 +16,8 @@ REEL_LINK = re.compile(r"https?://(?:www\.)?instagram\.com/(reels?|p)/([A-Za-z0-
 ADDED = "✅"
 FAILED = "❌"
 MAX_ATTEMPTS = 3
+# Cycles run hourly; spacing attempts out lets a reel's three attempts outlast a few bad hours at a service.
+RETRY_DELAY = timedelta(hours=8)
 
 log = logging.getLogger(__name__)
 
@@ -28,12 +31,17 @@ def run_cycle(ports: Ports, kb_dir: Path, *, owner_id: int) -> None:
         _react(ports.inbox, ref, ADDED)
     # Read once, before any paid call: a mistake in the owner's file fails the run without costing reels attempts.
     categories = load_categories(kb_dir)
+    now = ports.clock.now()
     for item in list(state.pending):
+        if item.last_attempt_at and now < (retry_at := datetime.fromisoformat(item.last_attempt_at) + RETRY_DELAY):
+            log.info("waiting %s: attempt %d/%d not before %s", item.shortcode, item.attempts + 1, MAX_ATTEMPTS, retry_at.strftime("%Y-%m-%d %H:%M UTC"))
+            continue
         try:
             category = _process(ports, kb_dir, item, categories)
         except Exception as error:
             item.attempts += 1
             item.last_error = _one_line(error)
+            item.last_attempt_at = now.isoformat()
             gave_up = item.attempts >= MAX_ATTEMPTS
             if gave_up:
                 state.pending.remove(item)
